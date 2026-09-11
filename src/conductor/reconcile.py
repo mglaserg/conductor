@@ -3,11 +3,11 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Iterable
 
-from conductor.domain.models import AggregateTarget, BrokerPosition, ExposureType, TradeDelta, ZERO
+from conductor.domain.models import AggregateTarget, BrokerPosition, TradeDelta, ZERO
 
 
 class DesiredStateReconciler:
-    """Computes the minimal deltas from actual broker state to desired state."""
+    """Compute minimal deltas from actual broker state to desired aggregate state."""
 
     def __init__(self, tolerance: Decimal = Decimal("0")) -> None:
         self.tolerance = tolerance
@@ -17,14 +17,7 @@ class DesiredStateReconciler:
         desired: Iterable[AggregateTarget],
         actual: Iterable[BrokerPosition],
     ) -> list[TradeDelta]:
-        desired_map: dict[str, Decimal] = {}
-        for target in desired:
-            if target.exposure_type is not ExposureType.QUANTITY:
-                raise ValueError(
-                    "execution reconciliation requires QUANTITY targets; translate weights/notional first"
-                )
-            desired_map[target.instrument] = target.target
-
+        desired_map = {target.instrument: target.target for target in desired}
         actual_map = {position.instrument: position.quantity for position in actual}
         instruments = sorted(set(desired_map) | set(actual_map))
         deltas: list[TradeDelta] = []
@@ -42,3 +35,10 @@ class DesiredStateReconciler:
                     )
                 )
         return deltas
+
+    def is_reconciled(
+        self,
+        desired: Iterable[AggregateTarget],
+        actual: Iterable[BrokerPosition],
+    ) -> bool:
+        return not self.reconcile(desired, actual)

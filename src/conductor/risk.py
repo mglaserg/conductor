@@ -1,61 +1,100 @@
 from __future__ import annotations
 
-from decimal import Decimal
+from collections import defaultdict
+from decimal import Decimal, ROUND_DOWN
 from typing import Iterable
 
-from conductor.domain.models import RiskDecision, VirtualTarget, ZERO, ONE
+from conductor.domain.models import ONE, RiskDecision, VirtualTarget, ZERO
 
 
-class SimplePortfolioRisk:
-    """Deliberately boring V0.1 portfolio risk scaler.
-
-    Targets are assumed to be NAV weights. It caps gross exposure and individual
-    instrument aggregate exposure without changing relative strategy ownership.
-    """
+class PortfolioRiskEngine:
+    """Portfolio-level exposure governor applied after strategy capital allocation."""
 
     def __init__(
         self,
-        max_gross: Decimal = Decimal("1.50"),
-        max_instrument_abs: Decimal = Decimal("0.20"),
+        portfolio_nav: Decimal,
+        max_gross_leverage: Decimal = Decimal("1.50"),
+        max_instrument_nav: Decimal = Decimal("0.20"),
     ) -> None:
-        self.max_gross = max_gross
-        self.max_instrument_abs = max_instrument_abs
+        if portfolio_nav <= ZERO:
+            raise ValueError("portfolio_nav must be positive")
+        if max_gross_leverage <= ZERO:
+            raise ValueError("max_gross_leverage must be positive")
+        if max_instrument_nav <= ZERO:
+            raise ValueError("max_instrument_nav must be positive")
+        self.portfolio_nav = portfolio_nav
+        self.max_gross_leverage = max_gross_leverage
+        self.max_instrument_nav = max_instrument_nav
 
-    def scale(self, targets: Iterable[VirtualTarget]) -> tuple[list[VirtualTarget], RiskDecision]:
+    @staticmethod
+    def _round_quantity(quantity: Decimal, lot_size: Decimal) -> Decimal:
+        lots = (abs(quantity) / lot_size).to_integral_value(rounding=ROUND_DOWN)
+        rounded = lots * lot_size
+        return rounded if quantity >= ZERO else -rounded
+
+    def apply(self, targets: Iterable[VirtualTarget]) -> tuple[list[VirtualTarget], RiskDecision]:
         items = list(targets)
-        by_instrument: dict[str, Decimal] = {}
+        by_instrument: dict[str, Decimal] = defaultdict(lambda: ZERO)
         for item in items:
-            by_instrument[item.instrument] = by_instrument.get(item.instrument, ZERO) + item.target
+            by_instrument[item.instrument] += item.notional
 
         gross = sum((abs(v) for v in by_instrument.values()), ZERO)
         largest = max((abs(v) for v in by_instrument.values()), default=ZERO)
 
-        gross_scale = ONE if gross <= self.max_gross or gross == ZERO else self.max_gross / gross
-        instrument_scale = (
-            ONE
-            if largest <= self.max_instrument_abs or largest == ZERO
-            else self.max_instrument_abs / largest
-        )
+        gross_cap = self.portfolio_nav * self.max_gross_leverage
+        instrument_cap = self.portfolio_nav * self.max_instrument_nav
+        gross_scale = ONE if gross <= gross_cap or gross == ZERO else gross_cap / gross
+        instrument_scale = ONE if largest <= instrument_cap or largest == ZERO else instrument_cap / largest
         scale = min(ONE, gross_scale, instrument_scale)
 
-        if scale == ONE:
-            reason = "PASS"
-        else:
-            constraints = []
-            if gross_scale < ONE:
-                constraints.append("max_gross")
-            if instrument_scale < ONE:
-                constraints.append("max_instrument")
-            reason = "SCALED:" + ",".join(constraints)
+        constraints: list[str] = []
+        if gross_scale < ONE:
+            constraints.append("max_gross")
+        if instrument_scale < ONE:
+            constraints.append("max_instrument")
+        reason = "PASS" if not constraints else "SCALED:" + ",".join(constraints)
 
-        scaled = [
-            VirtualTarget(
-                strategy_id=t.strategy_id,
-                sleeve_id=t.sleeve_id,
-                instrument=t.instrument,
-                target=t.target * scale,
-                exposure_type=t.exposure_type,
+        if scale == ONE:
+            return items, RiskDecision(
+                scale=ONE,
+                reason=reason,
+                gross_before=gross,
+                gross_after=gross,
+                largest_instrument_before=largest,
             )
-            for t in items
-        ]
-        return scaled, RiskDecision(scale=scale, reason=reason)
+
+        scaled: list[VirtualTarget] = []
+        for item in items:
+            quantity = self._round_quantity(item.target * scale, item.lot_size)
+            if quantity == ZERO:
+                continue
+            unit_notional = item.notional / item.target
+            scaled.append(
+                VirtualTarget(
+                    strategy_id=item.strategy_id,
+                    sleeve_id=item.sleeve_id,
+                    instrument=item.instrument,
+                    target=quantity,
+                    notional=quantity * unit_notional,
+                    exposure_type=item.exposure_type,
+                    source_exposure_type=item.source_exposure_type,
+                    lot_size=item.lot_size,
+                )
+            )
+
+        by_instrument_after: dict[str, Decimal] = defaultdict(lambda: ZERO)
+        for item in scaled:
+            by_instrument_after[item.instrument] += item.notional
+        gross_after = sum((abs(v) for v in by_instrument_after.values()), ZERO)
+
+        return scaled, RiskDecision(
+            scale=scale,
+            reason=reason,
+            gross_before=gross,
+            gross_after=gross_after,
+            largest_instrument_before=largest,
+        )
+
+
+# Compatibility alias for V0.1 callers.
+SimplePortfolioRisk = PortfolioRiskEngine

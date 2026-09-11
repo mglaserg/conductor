@@ -9,11 +9,11 @@ class NautilusVersionError(RuntimeError):
 
 
 def check_nautilus_v2() -> str:
-    """Fail fast if the runtime is not the v2 API Conductor targets.
+    """Fail fast unless the optional NautilusTrader v2 runtime is installed.
 
-    We deliberately do not import concrete v2 execution classes in the Conductor
-    domain package. The live bridge will live here and can evolve independently as
-    NautilusTrader v2 stabilizes.
+    Conductor deliberately keeps Nautilus types outside the domain model. This
+    module is the anti-corruption boundary where the concrete live/sandbox bridge
+    will evolve while the NautilusTrader v2 API stabilizes.
     """
     try:
         installed = version("nautilus_trader")
@@ -30,3 +30,14 @@ def check_nautilus_v2() -> str:
 
     import_module("nautilus_trader")
     return installed
+
+
+def main() -> None:
+    try:
+        installed = check_nautilus_v2()
+    except NautilusVersionError as exc:
+        print(f"NAUTILUS BRIDGE: NOT READY — {exc}")
+        raise SystemExit(2) from exc
+    print(f"NAUTILUS BRIDGE: RUNTIME FOUND — nautilus_trader {installed}")
+    print("Conductor domain model remains independent of Nautilus runtime types.")
+    print("Live capital routing is intentionally disabled in V0.2.")

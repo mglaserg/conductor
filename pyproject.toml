@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conductor-trading"
-version = "0.1.0"
+version = "0.2.0"
 description = "Portfolio control plane and strategy runtime for multi-strategy trading"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -19,6 +19,7 @@ nautilus = ["nautilus_trader>=2.0.0rc0,<3"]
 
 [project.scripts]
 conductor-demo = "conductor.cli:main"
+conductor-nautilus-smoke = "conductor.adapters.nautilus:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/conductor"]

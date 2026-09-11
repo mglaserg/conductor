@@ -1,18 +1,13 @@
 from decimal import Decimal
 
-from conductor.adapters.paper import PaperExecutionAdapter
-from conductor.domain.models import AggregateTarget, BrokerPosition, ExposureType
+from conductor.domain.models import AggregateTarget, BrokerPosition
 from conductor.reconcile import DesiredStateReconciler
 
 
-def test_desired_state_reconciliation_is_idempotent_after_execution() -> None:
-    adapter = PaperExecutionAdapter([BrokerPosition("AAPL", Decimal("137"))])
-    desired = [AggregateTarget("AAPL", Decimal("140"), ExposureType.QUANTITY)]
+def test_reconcile_is_desired_minus_actual_and_idempotent() -> None:
     reconciler = DesiredStateReconciler()
-
-    first = reconciler.reconcile(desired, adapter.positions())
-    assert first[0].delta == Decimal("3")
-
-    adapter.submit_deltas(first)
-    second = reconciler.reconcile(desired, adapter.positions())
-    assert second == []
+    desired = [AggregateTarget("AAPL", Decimal("140"), Decimal("28000"))]
+    actual = [BrokerPosition("AAPL", Decimal("137"))]
+    delta = reconciler.reconcile(desired, actual)[0]
+    assert delta.delta == Decimal("3")
+    assert reconciler.is_reconciled(desired, [BrokerPosition("AAPL", Decimal("140"))])

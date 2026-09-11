@@ -2,64 +2,94 @@
 
 Conductor is the portfolio control plane for independent trading strategies.
 
-**Strategies decide what they want. Conductor decides how to express, size, constrain,
-execute, reconcile, and attribute it.**
+> **Strategies decide what they want. Conductor decides how to express, size, constrain,
+> execute, reconcile, and attribute it.**
 
-## V0.1 architecture
+Conductor is deliberately *not* another strategy framework. Research projects remain independent.
+NautilusTrader is the intended execution/runtime kernel; Conductor owns the economic portfolio.
+
+## V0.2 architecture
 
 ```text
 Strategy projects
-    ETSA / RPSchteroids / Futurescope / Crypto YOLO / ...
-                         |
-                         v
-                  StrategyIntent
-                         |
-                         v
-                 PortfolioBuilder
-                         |
-              virtual ownership ledger
-                         |
-                         v
-                 AggregateTarget
-                         |
-                         v
-             DesiredStateReconciler
-                 /               \
-        desired state          actual state
-                 \               /
-                         v
-                     TradeDelta
-                         |
-                         v
-                 ExecutionAdapter
-                 /             \
-             Paper          Nautilus v2
-                                |
-                         IBKR / Hyperliquid
+ ETSA / RPSchteroids / Futurescope / Crypto YOLO / CleanCarry / ...
+                              |
+                              v
+                         StrategyIntent
+                              |
+                   revision + freshness gate
+                              |
+                              v
+                    Hierarchical capital budget
+                 portfolio -> sleeve -> strategy
+                              |
+                              v
+                 Instrument / quantity translation
+                              |
+                              v
+                    Virtual strategy targets
+                              |
+                     portfolio risk governor
+                              |
+                              v
+                 aggregate + cross-strategy netting
+                              |
+                desired state <-> actual broker state
+                              |
+                         OrderPlanner
+                              |
+                   ExecutionAdapter boundary
+                       /                \
+                    Paper            Nautilus v2
+                                         |
+                              IBKR / Hyperliquid / ...
+                              |
+                   post-trade reconciliation
+                              |
+                   committed virtual ownership
 ```
 
-The Conductor ledger remains authoritative for **economic strategy ownership** even when
-multiple strategies net to one broker position.
+The broker sees only aggregate positions. Conductor preserves the economic owner of each position
+inside its own virtual ledger.
 
-## Deliberate boundary with NautilusTrader
+## What V0.2 adds
 
-NautilusTrader owns venue/execution plumbing: order lifecycle, adapter routing, lower-level
-risk, fills, and venue reconciliation. Conductor owns strategy intent, sleeves, capital
-allocation, cross-strategy risk, desired state, virtual ownership, and attribution.
+- hierarchical portfolio NAV -> sleeve -> strategy capital budgets;
+- NAV-weight, notional and quantity intent semantics;
+- instrument prices, contract multipliers and lot-size translation;
+- strategy intent revisions and staleness refusal;
+- portfolio-level gross and single-instrument risk caps;
+- trade-buffer/order-planning layer;
+- desired-vs-actual broker reconciliation;
+- separate **virtual targets** and **committed virtual positions**;
+- economic ownership commits only once aggregate broker state reconciles;
+- run states and append-only events in SQLite;
+- deterministic idempotency: once desired state is reached, the next cycle produces no orders;
+- optional NautilusTrader v2 boundary kept outside the Conductor domain model.
 
-NautilusTrader v2 is currently pre-release. Conductor therefore keeps it behind an optional
-adapter boundary rather than importing Nautilus types into the domain model.
+## Portfolio semantics
 
-## Lubuntu setup
+For `NAV_WEIGHT` intents, strategy targets are weights inside the strategy's allocated capital.
+For example:
 
-Use Python 3.12+ and `uv`.
+```text
+Portfolio NAV                     $250,000
+Equities sleeve @ 50%             $125,000
+  ETSA @ 85%                      $106,250
+  RPSchteroids @ 15%               $18,750
+```
+
+An ETSA `AAPL = +0.40` target therefore requests approximately `$42,500` of AAPL before lot-size
+rounding. This is very different from multiplying an already-computed share count by `0.85`.
+
+`NOTIONAL` and `QUANTITY` intents are treated as absolute economic requests. Portfolio risk may
+still scale them.
+
+## Demo
+
+The included demo is intentionally paper-only:
 
 ```bash
-sudo apt update
-sudo apt install -y git curl
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-cd conductor
 uv venv --python 3.12
 source .venv/bin/activate
 uv pip install -e '.[dev]'
@@ -67,34 +97,58 @@ pytest -q
 conductor-demo
 ```
 
-To experiment with the NautilusTrader v2 bridge separately:
+The demo uses ETSA + RPSchteroids in one shared equity sleeve and proves:
+
+1. separate strategy capital budgets;
+2. separate virtual ownership of overlapping AAPL exposure;
+3. cross-strategy aggregation/netting;
+4. portfolio-level risk checks;
+5. desired-vs-actual order generation;
+6. broker-state reconciliation;
+7. virtual ownership commit; and
+8. a second cycle with zero trades.
+
+Nothing in the demo connects to a live account.
+
+## NautilusTrader boundary
+
+NautilusTrader owns venue/execution plumbing: live order lifecycle, adapter routing, lower-level
+risk, fills, execution algorithms, and venue reconciliation. Conductor owns strategy intent,
+sleeves, capital allocation, cross-strategy portfolio risk, desired state, economic ownership,
+and attribution.
+
+Install the optional v2 dependency only when testing the bridge:
 
 ```bash
 uv pip install -e '.[nautilus]'
-python -c "from conductor.adapters.nautilus import check_nautilus_v2; print(check_nautilus_v2())"
+conductor-nautilus-smoke
 ```
 
-Do **not** route production capital through the v2 release candidate merely because the
-optional dependency installs successfully.
+As of September 11, 2026, the public v2 docs are still on release-candidate builds. Do not route
+production capital merely because the v2 package installs successfully.
 
-## V0.1 rules
+## Lubuntu target
 
-1. Strategy projects never place broker orders through Conductor internals.
-2. Strategy outputs enter through `StrategyIntent`.
-3. Conductor preserves per-strategy virtual ownership before cross-strategy netting.
-4. Execution compares desired state with actual venue state; it does not assume prior orders succeeded.
-5. A restart should converge to the same desired state.
-6. Research logic stays in the source strategy project.
-7. Broker/exchange specifics stay behind execution adapters.
+Conductor's deployment target is Linux/Lubuntu. Production services should eventually use:
 
-## Next milestone
+- dedicated `uv`/venv environment;
+- absolute paths;
+- `.env` with restrictive permissions;
+- persistent SQLite/Postgres state and structured logs;
+- systemd service/timer units;
+- startup reconciliation before execution is enabled;
+- explicit paper/testnet/live modes.
 
-V0.2 should add:
+## Next portfolio work
 
-- intent ingestion schema/versioning and staleness handling;
-- instrument registry and translation (`VTI -> shares`, `TLT duration -> ZB DV01` later);
-- strategy/sleeve NAV and capital budgets;
-- order-plan objects with buffering and netting;
-- fill allocation back to virtual strategy ownership;
-- explicit run/reconciliation states and kill conditions;
-- Nautilus v2 paper/testnet bridge first, before live IBKR or Hyperliquid.
+V0.3 should deepen accounting rather than rush live execution:
+
+- fills and commission ingestion into the Conductor ledger;
+- strategy-level cost basis, realized/unrealized P&L and NAV;
+- explicit internal crossing when strategies trade opposite directions;
+- strategy/sleeve drawdown and capital-utilization reporting;
+- portfolio cash/margin reserve accounting;
+- contract/instrument translation registry, including Futurescope duration/DV01 translation later;
+- lifecycle objects for persistent targets, expiries and futures rolls;
+- Nautilus sandbox/paper bridge, then IBKR and Hyperliquid demo accounts;
+- only after those reconcile cleanly: guarded live routing.

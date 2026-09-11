@@ -1,36 +1,81 @@
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from conductor.domain.models import ExposureType, SleeveAllocation, StrategyIntent
-from conductor.portfolio import PortfolioBuilder
+import pytest
+
+from conductor.domain.models import ExposureType, InstrumentSpec, SleeveAllocation, StrategyIntent
+from conductor.portfolio import IntentBook, PortfolioBuilder, StaleIntentError
 
 
-def test_shared_account_targets_net_across_strategies() -> None:
-    builder = PortfolioBuilder(
-        {
+def test_nav_weight_becomes_strategy_budgeted_quantity() -> None:
+    portfolio = PortfolioBuilder(
+        allocations={
             "equities": SleeveAllocation(
                 "equities",
-                {"ETSA": Decimal("0.85"), "RPSchteroids": Decimal("0.15")},
+                {"ETSA": Decimal("0.85"), "RPS": Decimal("0.15")},
+                portfolio_weight=Decimal("0.50"),
             )
-        }
+        },
+        instruments={"AAPL": InstrumentSpec("AAPL", Decimal("200"))},
+        portfolio_nav=Decimal("250000"),
     )
-    virtual = builder.build_virtual_targets(
+
+    virtual = portfolio.build_virtual_targets(
         [
             StrategyIntent(
                 "ETSA",
-                {"AAPL": Decimal("100")},
-                ExposureType.QUANTITY,
-                "equities",
+                {"AAPL": Decimal("0.40")},
+                ExposureType.NAV_WEIGHT,
+                sleeve_id="equities",
             ),
             StrategyIntent(
-                "RPSchteroids",
-                {"AAPL": Decimal("-20")},
-                ExposureType.QUANTITY,
-                "equities",
+                "RPS",
+                {"AAPL": Decimal("0.20")},
+                ExposureType.NAV_WEIGHT,
+                sleeve_id="equities",
             ),
         ]
     )
-    aggregate = builder.aggregate(virtual)
 
-    assert len(virtual) == 2
-    assert aggregate[0].instrument == "AAPL"
-    assert aggregate[0].target == Decimal("82")
+    assert [(t.strategy_id, t.target, t.notional) for t in virtual] == [
+        ("ETSA", Decimal("212"), Decimal("42400")),
+        ("RPS", Decimal("18"), Decimal("3600")),
+    ]
+    aggregate = portfolio.aggregate(virtual)
+    assert aggregate[0].target == Decimal("230")
+    assert aggregate[0].notional == Decimal("46000")
+
+
+def test_quantity_intent_is_not_multiplied_by_capital_weight() -> None:
+    portfolio = PortfolioBuilder(
+        allocations={
+            "equities": SleeveAllocation(
+                "equities", {"ETSA": Decimal("0.10")}, portfolio_weight=Decimal("0.20")
+            )
+        },
+        instruments={"AAPL": InstrumentSpec("AAPL", Decimal("200"))},
+        portfolio_nav=Decimal("100000"),
+    )
+    target = portfolio.build_virtual_targets(
+        [
+            StrategyIntent(
+                "ETSA",
+                {"AAPL": Decimal("7")},
+                ExposureType.QUANTITY,
+                sleeve_id="equities",
+            )
+        ]
+    )[0]
+    assert target.target == Decimal("7")
+
+
+def test_intent_book_uses_latest_revision_and_rejects_stale() -> None:
+    now = datetime.now(timezone.utc)
+    book = IntentBook(max_age=timedelta(hours=1))
+    old_revision = StrategyIntent("ETSA", {"AAPL": Decimal("1")}, revision=1, as_of=now)
+    new_revision = StrategyIntent("ETSA", {"AAPL": Decimal("2")}, revision=2, as_of=now)
+    assert book.resolve([old_revision, new_revision], now=now)[0].revision == 2
+
+    stale = StrategyIntent("RPS", {"AAPL": Decimal("1")}, as_of=now - timedelta(hours=2))
+    with pytest.raises(StaleIntentError):
+        book.resolve([stale], now=now)
