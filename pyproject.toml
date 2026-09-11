@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "conductor-trading"
+version = "0.1.0"
+description = "Portfolio control plane and strategy runtime for multi-strategy trading"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "Proprietary"}
+authors = [{name = "Conductor"}]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+# Keep NautilusTrader optional while v2 remains pre-release.
+nautilus = ["nautilus_trader>=2.0.0rc0,<3"]
+
+[project.scripts]
+conductor-demo = "conductor.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/conductor"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
