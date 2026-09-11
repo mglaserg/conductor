@@ -31,7 +31,9 @@ class MissingInstrumentError(KeyError):
 class IntentBook:
     """Resolve latest strategy revisions and enforce freshness before trading."""
 
-    def __init__(self, max_age: timedelta = timedelta(hours=26)) -> None:
+    def __init__(self, max_age: timedelta | None = None) -> None:
+        # V0.3 protocol users enforce per-strategy freshness in StrategyProfile.
+        # max_age remains available for legacy/internal direct StrategyIntent callers.
         self.max_age = max_age
 
     def resolve(
@@ -43,7 +45,7 @@ class IntentBook:
         now = now or datetime.now(timezone.utc)
         latest: dict[tuple[str, str], StrategyIntent] = {}
         for intent in intents:
-            key = (intent.sleeve_id, intent.strategy_id)
+            key = (intent.strategy_id, intent.book_id)
             incumbent = latest.get(key)
             if incumbent is None or (intent.revision, intent.as_of) > (
                 incumbent.revision,
@@ -52,14 +54,14 @@ class IntentBook:
                 latest[key] = intent
 
         stale = [
-            f"{i.sleeve_id}/{i.strategy_id}@r{i.revision}"
+            f"{i.strategy_id}/{i.book_id}@r{i.revision}"
             for i in latest.values()
-            if now - i.as_of > self.max_age
+            if self.max_age is not None and now - i.as_of > self.max_age
         ]
         if stale:
             raise StaleIntentError("stale strategy intent(s): " + ", ".join(sorted(stale)))
 
-        return sorted(latest.values(), key=lambda i: (i.sleeve_id, i.strategy_id))
+        return sorted(latest.values(), key=lambda i: (i.strategy_id, i.book_id))
 
 
 class PortfolioBuilder:
@@ -134,6 +136,7 @@ class PortfolioBuilder:
                         strategy_id=intent.strategy_id,
                         sleeve_id=intent.sleeve_id,
                         instrument=instrument,
+                        book_id=intent.book_id,
                         target=quantity,
                         notional=notional,
                         exposure_type=ExposureType.QUANTITY,

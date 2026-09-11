@@ -44,7 +44,9 @@ class PortfolioRiskEngine:
         gross_cap = self.portfolio_nav * self.max_gross_leverage
         instrument_cap = self.portfolio_nav * self.max_instrument_nav
         gross_scale = ONE if gross <= gross_cap or gross == ZERO else gross_cap / gross
-        instrument_scale = ONE if largest <= instrument_cap or largest == ZERO else instrument_cap / largest
+        instrument_scale = (
+            ONE if largest <= instrument_cap or largest == ZERO else instrument_cap / largest
+        )
         scale = min(ONE, gross_scale, instrument_scale)
 
         constraints: list[str] = []

@@ -22,5 +22,7 @@ class PaperExecutionAdapter:
 
     def submit_deltas(self, deltas: Sequence[TradeDelta]) -> None:
         for delta in deltas:
-            self._positions[delta.instrument] = self._positions.get(delta.instrument, ZERO) + delta.delta
+            self._positions[delta.instrument] = (
+                self._positions.get(delta.instrument, ZERO) + delta.delta
+            )
             self.submissions.append(delta)

@@ -2,153 +2,201 @@
 
 Conductor is the portfolio control plane for independent trading strategies.
 
-> **Strategies decide what they want. Conductor decides how to express, size, constrain,
-> execute, reconcile, and attribute it.**
+> **Strategies publish desired economic state. Conductor owns capital, implementation, risk,
+> reconciliation, execution, and economic ownership.**
 
-Conductor is deliberately *not* another strategy framework. Research projects remain independent.
-NautilusTrader is the intended execution/runtime kernel; Conductor owns the economic portfolio.
+Conductor is not a strategy framework. ETSA, RPSchteroids, Futurescope, Crypto YOLO, CleanCarry,
+and later strategies remain independent research/production projects. NautilusTrader remains the
+intended lower-level execution/runtime kernel where it fits; Conductor owns the portfolio above it.
 
-## V0.2 architecture
+## V0.3 — Target Snapshot Protocol
 
-```text
-Strategy projects
- ETSA / RPSchteroids / Futurescope / Crypto YOLO / CleanCarry / ...
-                              |
-                              v
-                         StrategyIntent
-                              |
-                   revision + freshness gate
-                              |
-                              v
-                    Hierarchical capital budget
-                 portfolio -> sleeve -> strategy
-                              |
-                              v
-                 Instrument / quantity translation
-                              |
-                              v
-                    Virtual strategy targets
-                              |
-                     portfolio risk governor
-                              |
-                              v
-                 aggregate + cross-strategy netting
-                              |
-                desired state <-> actual broker state
-                              |
-                         OrderPlanner
-                              |
-                   ExecutionAdapter boundary
-                       /                \
-                    Paper            Nautilus v2
-                                         |
-                              IBKR / Hyperliquid / ...
-                              |
-                   post-trade reconciliation
-                              |
-                   committed virtual ownership
-```
+V0.3 replaces the loose external `StrategyIntent` boundary with one versioned Conductor protocol.
+There is **not** an ETSA schema, RPS schema, YOLO schema, etc. Strategies use thin producer-side
+adapters to publish one of two economic snapshot families:
 
-The broker sees only aggregate positions. Conductor preserves the economic owner of each position
-inside its own virtual ledger.
+- `LinearTargetSnapshot`: complete signed target weights relative to strategy capital;
+- `StructureTargetSnapshot`: complete desired spreads/pairs/options structures with leg ratios and
+  structure-level risk intent.
 
-## What V0.2 adds
-
-- hierarchical portfolio NAV -> sleeve -> strategy capital budgets;
-- NAV-weight, notional and quantity intent semantics;
-- instrument prices, contract multipliers and lot-size translation;
-- strategy intent revisions and staleness refusal;
-- portfolio-level gross and single-instrument risk caps;
-- trade-buffer/order-planning layer;
-- desired-vs-actual broker reconciliation;
-- separate **virtual targets** and **committed virtual positions**;
-- economic ownership commits only once aggregate broker state reconciles;
-- run states and append-only events in SQLite;
-- deterministic idempotency: once desired state is reached, the next cycle produces no orders;
-- optional NautilusTrader v2 boundary kept outside the Conductor domain model.
-
-## Portfolio semantics
-
-For `NAV_WEIGHT` intents, strategy targets are weights inside the strategy's allocated capital.
-For example:
+The internal V0.2 portfolio kernel remains in place behind this boundary.
 
 ```text
-Portfolio NAV                     $250,000
-Equities sleeve @ 50%             $125,000
-  ETSA @ 85%                      $106,250
-  RPSchteroids @ 15%               $18,750
+Strategy repo
+   native model / signal / portfolio logic
+                 |
+                 v
+          conductor producer SDK
+                 |
+       complete target snapshot
+                 |
+                 v
+       atomic local JSON inbox
+                 |
+                 v
+ schema + StrategyProfile validation
+                 |
+                 v
+ immutable intent event + desired book state
+                 |
+                 v
+      capital / quantity resolution
+                 |
+                 v
+        portfolio risk + netting
+                 |
+                 v
+ desired broker state <-> actual broker state
+                 |
+                 v
+             execution
+                 |
+                 v
+       committed virtual ownership
 ```
 
-An ETSA `AAPL = +0.40` target therefore requests approximately `$42,500` of AAPL before lot-size
-rounding. This is very different from multiplying an already-computed share count by `0.85`.
+See [`docs/TARGET_SNAPSHOT_PROTOCOL.md`](docs/TARGET_SNAPSHOT_PROTOCOL.md) for the frozen V1
+semantics implemented in this release.
 
-`NOTIONAL` and `QUANTITY` intents are treated as absolute economic requests. Portfolio risk may
-still scale them.
+## Key V0.3 properties
+
+- replacement identity is `(strategy_id, book_id)`;
+- snapshots are **complete desired state**, never diffs;
+- absent targets in a newer snapshot become zero;
+- an empty complete snapshot is a normal flatten;
+- `(source, event_id)` replay is idempotent;
+- same event ID with a different payload hard-rejects;
+- inbox publishing never overwrites an unprocessed event ID;
+- revisions are monotonic; revision gaps are allowed;
+- a book cannot silently change protocol family across revisions;
+- duplicate/revision checks and desired-state replacement are transactional in SQLite;
+- Pydantic models forbid unknown fields and generate committed JSON Schemas;
+- strategy permissions/staleness live in Conductor-owned `StrategyProfile`, not in strategy payloads;
+- accepted desired state is checked for freshness again before execution;
+- the V0.2 virtual ledger migrates from `(strategy, instrument)` to
+  `(strategy, book, instrument)`, assigning existing rows to `book_id="main"`;
+- local file transport is atomic and works on Windows and Lubuntu;
+- structure snapshots are validated/stored in V0.3 but are **not executable yet**.
+
+## Producer example
+
+ETSA and RPSchteroids use the same linear contract:
+
+```python
+from datetime import datetime, timezone
+from conductor.protocol.sdk import FilesystemConductorClient
+
+client = FilesystemConductorClient(r"C:\Trading\Conductor\runtime\inbox")
+client.submit_linear(
+    strategy_id="ETSA",
+    book_id="main",
+    revision=42,
+    as_of=datetime.now(timezone.utc),
+    targets={
+        "EQ.US.AAPL": "0.08",
+        "EQ.US.MSFT": "-0.06",
+        "EQ.US.NVDA": "0.04",
+    },
+)
+```
+
+Those are target weights inside ETSA's allocated capital budget. They are not trade deltas.
+Conductor resolves quantities and computes broker deltas itself.
+
+See `examples/etsa_producer.py`, `examples/rpschteroids_producer.py`, and
+`examples/futurescope_structure_producer.py`.
 
 ## Demo
 
-The included demo is intentionally paper-only:
+Python 3.12+ is required. From either Windows or Lubuntu:
 
-```bash
+```text
 uv venv --python 3.12
-source .venv/bin/activate
-uv pip install -e '.[dev]'
-pytest -q
-conductor-demo
+uv pip install -e ".[dev]"
+uv run pytest -q
+uv run conductor-demo
 ```
 
-The demo uses ETSA + RPSchteroids in one shared equity sleeve and proves:
+Or:
 
-1. separate strategy capital budgets;
-2. separate virtual ownership of overlapping AAPL exposure;
-3. cross-strategy aggregation/netting;
-4. portfolio-level risk checks;
-5. desired-vs-actual order generation;
-6. broker-state reconciliation;
-7. virtual ownership commit; and
-8. a second cycle with zero trades.
+```text
+uv run conductor demo
+```
+
+The demo is paper-only. It:
+
+1. has ETSA and RPS publish real V0.3 snapshot files;
+2. validates and accepts them into SQLite desired state;
+3. turns strategy-budget weights into quantities;
+4. nets overlapping AAPL ownership;
+5. reconciles a paper broker;
+6. publishes ETSA revision 2 with MSFT omitted;
+7. proves omission means zero and removes ETSA's MSFT exposure; and
+8. proves the next identical cycle creates zero trades.
 
 Nothing in the demo connects to a live account.
 
-## NautilusTrader boundary
+## Protocol tools
 
-NautilusTrader owns venue/execution plumbing: live order lifecycle, adapter routing, lower-level
-risk, fills, execution algorithms, and venue reconciliation. Conductor owns strategy intent,
-sleeves, capital allocation, cross-strategy portfolio risk, desired state, economic ownership,
-and attribution.
+Validate a snapshot:
 
-Install the optional v2 dependency only when testing the bridge:
-
-```bash
-uv pip install -e '.[nautilus]'
-conductor-nautilus-smoke
+```text
+uv run conductor validate path/to/snapshot.json
 ```
 
-As of September 11, 2026, the public v2 docs are still on release-candidate builds. Do not route
-production capital merely because the v2 package installs successfully.
+Regenerate JSON Schemas:
 
-## Lubuntu target
+```text
+uv run conductor schemas schemas
+```
 
-Conductor's deployment target is Linux/Lubuntu. Production services should eventually use:
+Committed schemas:
 
-- dedicated `uv`/venv environment;
-- absolute paths;
-- `.env` with restrictive permissions;
-- persistent SQLite/Postgres state and structured logs;
-- systemd service/timer units;
-- startup reconciliation before execution is enabled;
-- explicit paper/testnet/live modes.
+- `schemas/linear-target-snapshot-v1.json`
+- `schemas/structure-target-snapshot-v1.json`
 
-## Next portfolio work
+## Deployment topology
 
-V0.3 should deepen accounting rather than rush live execution:
+Conductor is one logical system with two independent runtime nodes:
 
-- fills and commission ingestion into the Conductor ledger;
-- strategy-level cost basis, realized/unrealized P&L and NAV;
-- explicit internal crossing when strategies trade opposite directions;
-- strategy/sleeve drawdown and capital-utilization reporting;
-- portfolio cash/margin reserve accounting;
-- contract/instrument translation registry, including Futurescope duration/DV01 translation later;
-- lifecycle objects for persistent targets, expiries and futures rolls;
-- Nautilus sandbox/paper bridge, then IBKR and Hyperliquid demo accounts;
-- only after those reconcile cleanly: guarded live routing.
+```text
+Windows node                         Lubuntu node
+------------                         ------------
+Equities                             Crypto
+Futures
+Options
+
+IBKR / Windows adapters              Hyperliquid / crypto adapters
+Windows service/task plumbing        systemd service/timer plumbing
+local durable state                  local durable state
+```
+
+Both nodes use the same protocol, portfolio semantics, ledger model, and risk vocabulary. Each node
+must remain safe and operable with local state; a future global portfolio view can aggregate the two
+without making either machine depend on a shared database to trade safely.
+
+## NautilusTrader boundary
+
+NautilusTrader remains optional:
+
+```text
+uv pip install -e ".[nautilus]"
+uv run conductor-nautilus-smoke
+```
+
+Conductor's domain and protocol do not depend on Nautilus types. This lets the Windows node use a
+Windows-appropriate execution adapter while the Lubuntu crypto node can use Nautilus/Hyperliquid
+where appropriate.
+
+## What V0.3 deliberately does not do
+
+- live broker/exchange routing;
+- structure-to-leg quantity sizing;
+- options lifecycle/Greeks translation;
+- futures spread lifecycle/roll management;
+- cross-node shared execution state;
+- full canonical instrument registry enforcement;
+- strategy P&L/cost-basis attribution.
+
+Those remain portfolio/runtime milestones. The protocol boundary is now stable enough to build them
+without requiring strategy repositories to know broker mechanics.

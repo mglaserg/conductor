@@ -48,10 +48,13 @@ class StrategyIntent:
     schema_version: str = "1.0"
     intent_id: str = field(default_factory=lambda: uuid4().hex)
     metadata: Mapping[str, str] = field(default_factory=dict)
+    book_id: str = "main"
 
     def __post_init__(self) -> None:
         if not self.strategy_id.strip():
             raise ValueError("strategy_id must be non-empty")
+        if not self.book_id.strip():
+            raise ValueError("book_id must be non-empty")
         if not self.sleeve_id.strip():
             raise ValueError("sleeve_id must be non-empty")
         if self.revision < 1:
@@ -126,6 +129,7 @@ class VirtualTarget:
     instrument: str
     target: Decimal  # quantity
     notional: Decimal
+    book_id: str = "main"
     exposure_type: ExposureType = ExposureType.QUANTITY
     source_exposure_type: ExposureType = ExposureType.NAV_WEIGHT
     lot_size: Decimal = ONE

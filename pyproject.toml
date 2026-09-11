@@ -1,16 +1,16 @@
 [build-system]
-requires = ["hatchling>=1.25"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "conductor-trading"
-version = "0.2.0"
+version = "0.3.0"
 description = "Portfolio control plane and strategy runtime for multi-strategy trading"
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "Proprietary"}
 authors = [{name = "Conductor"}]
-dependencies = []
+dependencies = ["pydantic>=2.8,<3"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6"]
@@ -18,11 +18,12 @@ dev = ["pytest>=8.0", "ruff>=0.6"]
 nautilus = ["nautilus_trader>=2.0.0rc0,<3"]
 
 [project.scripts]
+conductor = "conductor.command:main"
 conductor-demo = "conductor.cli:main"
 conductor-nautilus-smoke = "conductor.adapters.nautilus:main"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/conductor"]
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

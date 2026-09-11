@@ -1,0 +1,145 @@
+{
+  "$defs": {
+    "LinearSnapshotData": {
+      "additionalProperties": false,
+      "properties": {
+        "as_of": {
+          "format": "date-time",
+          "title": "As Of",
+          "type": "string"
+        },
+        "book_id": {
+          "default": "main",
+          "minLength": 1,
+          "title": "Book Id",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "strategy_id": {
+          "minLength": 1,
+          "title": "Strategy Id",
+          "type": "string"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/LinearTarget"
+          },
+          "title": "Targets",
+          "type": "array"
+        },
+        "valid_until": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valid Until"
+        },
+        "weight_basis": {
+          "const": "strategy_budget",
+          "default": "strategy_budget",
+          "title": "Weight Basis",
+          "type": "string"
+        }
+      },
+      "required": [
+        "strategy_id",
+        "revision",
+        "as_of",
+        "targets"
+      ],
+      "title": "LinearSnapshotData",
+      "type": "object"
+    },
+    "LinearTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "instrument": {
+          "minLength": 1,
+          "title": "Instrument",
+          "type": "string"
+        },
+        "weight": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Weight"
+        }
+      },
+      "required": [
+        "instrument",
+        "weight"
+      ],
+      "title": "LinearTarget",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "data": {
+      "$ref": "#/$defs/LinearSnapshotData"
+    },
+    "dataschema": {
+      "const": "urn:defacto:conductor:schema:linear-target-snapshot:v1",
+      "default": "urn:defacto:conductor:schema:linear-target-snapshot:v1",
+      "title": "Dataschema",
+      "type": "string"
+    },
+    "id": {
+      "minLength": 1,
+      "title": "Id",
+      "type": "string"
+    },
+    "source": {
+      "minLength": 1,
+      "title": "Source",
+      "type": "string"
+    },
+    "specversion": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Specversion",
+      "type": "string"
+    },
+    "subject": {
+      "minLength": 1,
+      "title": "Subject",
+      "type": "string"
+    },
+    "time": {
+      "format": "date-time",
+      "title": "Time",
+      "type": "string"
+    },
+    "type": {
+      "const": "com.defacto.conductor.linear-target-snapshot.v1",
+      "default": "com.defacto.conductor.linear-target-snapshot.v1",
+      "title": "Type",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "source",
+    "subject",
+    "time",
+    "data"
+  ],
+  "title": "LinearTargetSnapshot",
+  "type": "object"
+}

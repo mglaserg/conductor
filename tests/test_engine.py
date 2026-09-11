@@ -1,7 +1,13 @@
 from decimal import Decimal
 
 from conductor.adapters.paper import PaperExecutionAdapter
-from conductor.domain.models import BrokerPosition, ExposureType, InstrumentSpec, SleeveAllocation, StrategyIntent
+from conductor.domain.models import (
+    BrokerPosition,
+    ExposureType,
+    InstrumentSpec,
+    SleeveAllocation,
+    StrategyIntent,
+)
 from conductor.engine import ConductorEngine
 from conductor.ledger import ConductorLedger
 from conductor.orders import OrderPlanner
@@ -10,7 +16,9 @@ from conductor.reconcile import DesiredStateReconciler
 from conductor.risk import PortfolioRiskEngine
 
 
-def test_engine_commits_ownership_only_after_reconciliation_and_second_run_is_empty(tmp_path) -> None:
+def test_engine_commits_ownership_only_after_reconciliation_and_second_run_is_empty(
+    tmp_path,
+) -> None:
     nav = Decimal("100000")
     instruments = {"AAPL": InstrumentSpec("AAPL", Decimal("100"))}
     portfolio = PortfolioBuilder(
@@ -29,7 +37,12 @@ def test_engine_commits_ownership_only_after_reconciliation_and_second_run_is_em
         ledger=ledger,
     )
     intents = [
-        StrategyIntent("ETSA", {"AAPL": Decimal("0.10")}, ExposureType.NAV_WEIGHT, sleeve_id="equities")
+        StrategyIntent(
+            "ETSA",
+            {"AAPL": Decimal("0.10")},
+            ExposureType.NAV_WEIGHT,
+            sleeve_id="equities",
+        )
     ]
 
     first = engine.run_cycle(intents)
