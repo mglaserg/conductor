@@ -34,12 +34,12 @@ class PortfolioRiskEngine:
 
     def apply(self, targets: Iterable[VirtualTarget]) -> tuple[list[VirtualTarget], RiskDecision]:
         items = list(targets)
-        by_instrument: dict[str, Decimal] = defaultdict(lambda: ZERO)
+        by_market: dict[tuple[str, str], Decimal] = defaultdict(lambda: ZERO)
         for item in items:
-            by_instrument[item.instrument] += item.notional
+            by_market[(item.route_id, item.instrument)] += item.notional
 
-        gross = sum((abs(v) for v in by_instrument.values()), ZERO)
-        largest = max((abs(v) for v in by_instrument.values()), default=ZERO)
+        gross = sum((abs(v) for v in by_market.values()), ZERO)
+        largest = max((abs(v) for v in by_market.values()), default=ZERO)
 
         gross_cap = self.portfolio_nav * self.max_gross_leverage
         instrument_cap = self.portfolio_nav * self.max_instrument_nav
@@ -81,13 +81,14 @@ class PortfolioRiskEngine:
                     exposure_type=item.exposure_type,
                     source_exposure_type=item.source_exposure_type,
                     lot_size=item.lot_size,
+                    route_id=item.route_id,
                 )
             )
 
-        by_instrument_after: dict[str, Decimal] = defaultdict(lambda: ZERO)
+        by_market_after: dict[tuple[str, str], Decimal] = defaultdict(lambda: ZERO)
         for item in scaled:
-            by_instrument_after[item.instrument] += item.notional
-        gross_after = sum((abs(v) for v in by_instrument_after.values()), ZERO)
+            by_market_after[(item.route_id, item.instrument)] += item.notional
+        gross_after = sum((abs(v) for v in by_market_after.values()), ZERO)
 
         return scaled, RiskDecision(
             scale=scale,

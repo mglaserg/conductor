@@ -17,13 +17,13 @@ class DesiredStateReconciler:
         desired: Iterable[AggregateTarget],
         actual: Iterable[BrokerPosition],
     ) -> list[TradeDelta]:
-        desired_map = {target.instrument: target.target for target in desired}
-        actual_map = {position.instrument: position.quantity for position in actual}
+        desired_map = {(target.route_id, target.instrument): target.target for target in desired}
+        actual_map = {(position.route_id, position.instrument): position.quantity for position in actual}
         instruments = sorted(set(desired_map) | set(actual_map))
         deltas: list[TradeDelta] = []
-        for instrument in instruments:
-            current = actual_map.get(instrument, ZERO)
-            wanted = desired_map.get(instrument, ZERO)
+        for route_id, instrument in instruments:
+            current = actual_map.get((route_id, instrument), ZERO)
+            wanted = desired_map.get((route_id, instrument), ZERO)
             delta = wanted - current
             if abs(delta) > self.tolerance:
                 deltas.append(
@@ -32,6 +32,7 @@ class DesiredStateReconciler:
                         current=current,
                         desired=wanted,
                         delta=delta,
+                        route_id=route_id,
                     )
                 )
         return deltas

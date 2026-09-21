@@ -1,0 +1,4 @@
+[console_scripts]
+conductor = conductor.command:main
+conductor-demo = conductor.cli:main
+conductor-nautilus-smoke = conductor.adapters.nautilus:main

@@ -1,0 +1,95 @@
+# Conductor V0.4 alpha — Windows ETSA/RPSchteroids/TLAQ migration template.
+# SAFE DEFAULT: the persistent Nautilus worker connects to IBKR for real state/prices,
+# but Conductor never enqueues live orders until live_orders_enabled=true.
+
+[node]
+id = "windows-main"
+state_db = "data/conductor.sqlite"
+run_root = "data/runs"
+nav_source_route = "windows_ibkr_equities"
+
+[routes.windows_ibkr_equities]
+adapter = "nautilus_ibkr"
+account = "REPLACE_WITH_IBKR_ACCOUNT"
+host = "127.0.0.1"
+port = 7497
+data_client_id = 1301
+exec_client_id = 1302
+market_data_type = "REALTIME"
+# BOOTSTRAP SAFETY: list every current IBKR equity holding not already present in
+# the strategy seed positions. These are reconciliation-only; doctor will fail
+# until each non-zero holding is assigned to a Conductor virtual book or removed.
+preload_instruments = []
+bridge_db = "data/windows_ibkr_equities_nautilus_bridge.sqlite"
+instrument_cache_path = "data/windows_ibkr_equities_ib_instruments.json"
+worker_stale_after_seconds = 15
+request_timeout_seconds = 60
+order_timeout_seconds = 30
+live_orders_enabled = false
+
+# Existing ETSA/RPS sleeve policy. Runtime target-weight sizing uses each
+# strategy's persisted allocated_capital below; this section records the
+# hierarchy/policy and preserves the existing sleeve leverage convention.
+[sleeves.etsa_rps]
+portfolio_weight = 1.0
+leverage = 1.0
+rebalance_band = 0.025
+strategy_weights = { ETSA = 0.85, RPSchteroids = 0.15 }
+
+# TLAQ is a separate economic book even though it may share physical stocks.
+[sleeves.tlaq]
+portfolio_weight = 0.0
+leverage = 1.0
+rebalance_band = 0.0
+strategy_weights = { TLAQ = 1.0 }
+
+[risk]
+max_gross_leverage = 2.0
+max_instrument_nav = 0.20
+
+[execution]
+# Tiny final account-level dust filter. ETSA/RPS's real 2.5% implementation
+# band is applied above inside the etsa_rps virtual sleeve, before TLAQ netting.
+min_trade_nav_bps = 1
+
+[strategies.ETSA]
+sleeve_id = "etsa_rps"
+result_mode = "target_weights"
+route_id = "windows_ibkr_equities"
+cwd = "C:/Trading/Yautja-Orchestra"
+command = ["uv", "run", "python", "etsa_conductor_adapter.py"]
+timeout_seconds = 600
+[strategies.ETSA.seed]
+# MUST be set to the actual ETSA capital budget before shadow comparison.
+allocated_capital = 0
+cash = 0
+positions = {}
+
+[strategies.RPSchteroids]
+sleeve_id = "etsa_rps"
+result_mode = "target_quantities"
+route_id = "windows_ibkr_equities"
+cwd = "C:/Trading/RPSchteroids"
+command = ["uv", "run", "python", "rpschteroids_conductor_adapter.py"]
+timeout_seconds = 600
+[strategies.RPSchteroids.environment]
+RPS_TARGET_CALLABLE = "REPLACE.module:target_positions"
+[strategies.RPSchteroids.seed]
+allocated_capital = 0
+cash = 0
+positions = {}
+
+[strategies.TLAQ]
+sleeve_id = "tlaq"
+result_mode = "position_deltas"
+route_id = "windows_ibkr_equities"
+cwd = "C:/Trading/TLAQ"
+command = ["uv", "run", "python", "tlaq_conductor_adapter.py"]
+timeout_seconds = 600
+[strategies.TLAQ.environment]
+TLAQ_DELTA_CALLABLE = "REPLACE.module:trade_deltas"
+[strategies.TLAQ.seed]
+# TLAQ cash may legitimately be negative; that represents strategy financing.
+allocated_capital = 0
+cash = 0
+positions = {}

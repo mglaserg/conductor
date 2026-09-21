@@ -99,7 +99,7 @@ def main() -> None:
             ledger=ledger,
         )
 
-        print("CONDUCTOR V0.3 — TARGET SNAPSHOT PROTOCOL DEMO")
+        print("CONDUCTOR V0.3 - TARGET SNAPSHOT PROTOCOL DEMO")
         print("=" * 59)
         print(f"Portfolio NAV       {_money(nav)}")
         print("Transport           atomic local JSON inbox")
@@ -141,7 +141,7 @@ def main() -> None:
         )
         processor.process_all(now=now)
         intents = acceptor.current_linear_intents(now=now)
-        _print_run("ETSA REVISION 2 — MSFT ABSENT ⇒ ZERO", engine, intents)
+        _print_run("ETSA REVISION 2 - MSFT ABSENT => ZERO", engine, intents)
         _print_run("IDEMPOTENCY CHECK", engine, intents)
 
         print("\nCURRENT DESIRED BOOKS")

@@ -4,13 +4,17 @@ from dataclasses import dataclass, field
 from typing import Iterable
 from uuid import uuid4
 
+from conductor.accounting import VirtualAccountingEngine
 from conductor.adapters.base import ExecutionAdapter
 from conductor.domain.models import RunResult, RunState, StrategyIntent, TradeDelta
 from conductor.ledger import ConductorLedger
 from conductor.orders import OrderPlanner
 from conductor.portfolio import IntentBook, PortfolioBuilder
+from conductor.rebalance import VirtualRebalanceBuffer
 from conductor.reconcile import DesiredStateReconciler
 from conductor.risk import PortfolioRiskEngine
+
+TERMINAL_EXECUTION_FAILURES = frozenset({"rejected", "denied", "canceled", "expired", "failed"})
 
 
 @dataclass(slots=True)
@@ -22,16 +26,21 @@ class ConductorEngine:
     order_planner: OrderPlanner
     intent_book: IntentBook = field(default_factory=IntentBook)
     ledger: ConductorLedger | None = None
+    accounting: VirtualAccountingEngine | None = None
+    rebalance_buffer: VirtualRebalanceBuffer | None = None
 
-    def run_cycle(self, intents: Iterable[StrategyIntent]) -> RunResult:
-        run_id = uuid4().hex
+    def run_cycle(
+        self, intents: Iterable[StrategyIntent], *, run_id: str | None = None
+    ) -> RunResult:
+        run_id = run_id or uuid4().hex
         resolved = self.intent_book.resolve(intents)
-        virtual = self.portfolio.build_virtual_targets(resolved)
-        virtual, risk_decision = self.risk.apply(virtual)
-        metrics = self.portfolio.metrics(virtual)
+        desired_virtual = self.portfolio.build_virtual_targets(resolved)
+        desired_virtual, risk_decision = self.risk.apply(desired_virtual)
 
         if self.ledger:
-            self.ledger.replace_virtual_targets(virtual)
+            # Virtual targets mean desired/risk-adjusted economic state. Implemented
+            # ownership can differ temporarily because of explicit rebalance bands.
+            self.ledger.replace_virtual_targets(desired_virtual)
             self.ledger.append_event(
                 "risk_decision",
                 {
@@ -43,7 +52,30 @@ class ConductorEngine:
                 },
             )
 
-        aggregate = self.portfolio.aggregate(virtual)
+        if self.rebalance_buffer is not None:
+            implemented_virtual, band_decisions = self.rebalance_buffer.apply(desired_virtual)
+        else:
+            implemented_virtual, band_decisions = desired_virtual, []
+        metrics = self.portfolio.metrics(implemented_virtual)
+        if self.ledger and band_decisions:
+            for decision in band_decisions:
+                self.ledger.append_event(
+                    "rebalance.band_decision",
+                    {
+                        "run_id": run_id,
+                        "sleeve_id": decision.sleeve_id,
+                        "route_id": decision.route_id,
+                        "instrument": decision.instrument,
+                        "band": str(decision.band),
+                        "capital_base": str(decision.capital_base),
+                        "current_quantity": str(decision.current_quantity),
+                        "desired_quantity": str(decision.desired_quantity),
+                        "delta_notional": str(decision.delta_notional),
+                        "suppressed": decision.suppressed,
+                    },
+                )
+
+        aggregate = self.portfolio.aggregate(implemented_virtual)
         actual_before = self.execution.positions()
         raw_deltas = self.reconciler.reconcile(aggregate, actual_before)
         deltas = self.order_planner.plan(raw_deltas)
@@ -55,6 +87,7 @@ class ConductorEngine:
                     "run_id": run_id,
                     "deltas": [
                         {
+                            "route_id": d.route_id,
                             "instrument": d.instrument,
                             "current": str(d.current),
                             "desired": str(d.desired),
@@ -66,16 +99,58 @@ class ConductorEngine:
                 },
             )
 
-        self.execution.submit_deltas(deltas)
+        execution_reports = list(self.execution.submit_deltas(deltas) or [])
+        if self.ledger and execution_reports:
+            self.ledger.append_event(
+                "execution.reports_received",
+                {
+                    "run_id": run_id,
+                    "reports": [
+                        {
+                            "route_id": report.route_id,
+                            "instrument": report.instrument,
+                            "requested_quantity": str(report.requested_quantity),
+                            "filled_quantity": str(report.filled_quantity),
+                            "avg_price": (
+                                None if report.avg_price is None else str(report.avg_price)
+                            ),
+                            "commission": str(report.commission),
+                            "status": report.status,
+                            "order_id": report.order_id,
+                        }
+                        for report in execution_reports
+                    ],
+                },
+            )
         actual_after = self.execution.positions()
         reconciled = self.reconciler.is_reconciled(aggregate, actual_after)
-        state = RunState.RECONCILED if reconciled else RunState.SUBMITTED
+        shadow_planned = any(report.status == "shadow" for report in execution_reports)
+        terminal_failure = any(
+            report.status.lower() in TERMINAL_EXECUTION_FAILURES
+            for report in execution_reports
+        )
+        if reconciled:
+            state = RunState.RECONCILED
+        elif shadow_planned:
+            state = RunState.PLANNED
+        elif terminal_failure:
+            # A rejected/canceled terminal order cannot converge without a new
+            # operator or scheduler action. Distinguish it from an asynchronous
+            # submission whose broker state may still catch up.
+            state = RunState.BLOCKED
+        else:
+            state = RunState.SUBMITTED
 
         # For synchronous paper/sandbox execution this commits immediately. For a
         # live async adapter, ownership remains uncommitted until a later cycle sees
         # venue state fully aligned with desired aggregate state.
         if reconciled and self.ledger:
-            self.ledger.replace_virtual_positions(virtual)
+            if self.accounting is not None:
+                self.accounting.commit(
+                    implemented_virtual, run_id=run_id, execution_reports=execution_reports
+                )
+            else:
+                self.ledger.replace_virtual_positions(implemented_virtual)
 
         if self.ledger:
             self.ledger.record_run(

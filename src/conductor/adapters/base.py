@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol, Sequence
 
-from conductor.domain.models import BrokerPosition, TradeDelta
+from conductor.domain.models import BrokerPosition, ExecutionReport, TradeDelta
 
 
 class ExecutionAdapter(Protocol):
@@ -10,4 +10,4 @@ class ExecutionAdapter(Protocol):
 
     def positions(self) -> Sequence[BrokerPosition]: ...
 
-    def submit_deltas(self, deltas: Sequence[TradeDelta]) -> None: ...
+    def submit_deltas(self, deltas: Sequence[TradeDelta]) -> Sequence[ExecutionReport]: ...

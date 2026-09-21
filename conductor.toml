@@ -1,0 +1,256 @@
+# ============================================================
+# CONDUCTOR — WINDOWS
+# Equities / Futures / Options
+# ============================================================
+
+
+# ------------------------------------------------------------
+# NODE
+# ------------------------------------------------------------
+
+[node]
+id = "windows-main"
+
+state_db = "data/conductor.sqlite"
+run_root = "data/runs"
+
+# nav_source_route = "windows_ibkr"
+portfolio_nav = 100000
+
+# ------------------------------------------------------------
+# PORTFOLIO CAPITAL ALLOCATION
+#
+# This Windows portfolio is independent of the Lubuntu crypto
+# portfolio.
+#
+# ONE allocator is active at a time:
+#   static
+#   inverse_vol
+#   erc
+# ------------------------------------------------------------
+
+[portfolio]
+allocator = "static"
+
+
+# Used when allocator = "static".
+# These weights divide the Windows portfolio NAV among strategies.
+# Must sum to 1.0.
+
+[portfolio.static.weights]
+ETSA = 0.40
+RPSchteroids = 0.15
+TLAQ = 0.45
+
+
+# Configuration retained even when inactive, so changing allocator
+# is just a config change.
+
+[portfolio.inverse_vol]
+lookback_days = 63
+estimator = "ewma"
+ewma_lambda = 0.94
+
+min_weight = 0.05
+max_weight = 0.70
+
+# Don't constantly rebalance capital for microscopic changes.
+rebalance_threshold = 0.025
+
+
+[portfolio.erc]
+lookback_days = 126
+covariance = "ledoit_wolf"
+
+min_weight = 0.05
+max_weight = 0.70
+
+rebalance_threshold = 0.025
+
+
+# If ERC cannot run because of insufficient history / optimizer
+# failure, Conductor can fall back safely.
+
+[portfolio.fallback]
+order = ["erc", "inverse_vol", "static"]
+
+
+# ------------------------------------------------------------
+# PORTFOLIO RISK
+# ------------------------------------------------------------
+
+[risk]
+
+# Across all Windows strategies combined.
+max_gross_leverage = 2.0
+max_net_exposure = 1.0
+
+# Max economic exposure to one underlying as fraction of NAV.
+max_instrument_nav = 0.20
+
+# Keep margin headroom instead of using everything IBKR offers.
+max_margin_utilization = 0.60
+
+
+# ------------------------------------------------------------
+# EXECUTION
+# ------------------------------------------------------------
+
+[execution]
+
+# Avoid microscopic aggregate broker trades.
+min_trade_nav_bps = 1
+
+
+# ------------------------------------------------------------
+# IBKR EXECUTION ROUTE
+#
+# Nautilus owns:
+#   instrument resolution
+#   market data
+#   orders
+#   fills
+#   broker reconciliation
+#
+# Conductor owns:
+#   strategy ownership
+#   virtual cash
+#   allocation
+#   risk
+#   internal crossing
+# ------------------------------------------------------------
+
+[routes.windows_ibkr]
+adapter = "nautilus_ibkr"
+
+account = "U20744719"
+
+host = "127.0.0.1"
+
+# TWS:
+# paper = 7497
+# live  = 7496
+port = 7496
+
+data_client_id = 1301
+exec_client_id = 1302
+
+market_data_type = "REALTIME"
+
+bridge_db = "data/nautilus_ibkr_bridge.sqlite"
+instrument_cache_path = "data/ibkr_instruments.json"
+
+worker_stale_after_seconds = 15
+request_timeout_seconds = 60
+order_timeout_seconds = 30
+
+# START FALSE.
+live_orders_enabled = false
+
+# Existing physical IBKR positions outside the strategy bootstrap
+# can be listed here so Nautilus loads them during migration.
+preload_instruments = []
+
+
+# ============================================================
+# STRATEGIES
+# ============================================================
+
+
+# ------------------------------------------------------------
+# ETSA
+#
+# Native output:
+# complete absolute TARGET WEIGHTS
+# ------------------------------------------------------------
+
+[strategies.ETSA]
+result_mode = "target_weights"
+route_id = "windows_ibkr"
+
+cwd = "C:/Users/mglas/Documents/trading/ETSA"
+
+command = [
+    "uv",
+    "run",
+    "python",
+    "conductor_adapter.py"
+]
+
+timeout_seconds = 600
+
+# Exposure permitted relative to capital assigned by allocator.
+max_gross_leverage = 2
+
+
+# Bootstrap ONLY.
+# Used once to establish Conductor's starting virtual book.
+# After initialization, SQLite owns this state.
+
+[strategies.ETSA.seed]
+cash = 0
+positions = {}
+
+
+# ------------------------------------------------------------
+# RPSCHTEROIDS
+#
+# Native output:
+# complete absolute TARGET WEIGHTS
+# ------------------------------------------------------------
+
+[strategies.RPSchteroids]
+result_mode = "target_weights"
+route_id = "windows_ibkr"
+
+cwd = "C:/Users/mglas/Documents/trading/RPSchteroids"
+
+command = [
+    "uv",
+    "run",
+    "python",
+    "conductor_adapter.py"
+]
+
+timeout_seconds = 600
+max_gross_leverage = 2
+
+[strategies.RPSchteroids.seed]
+cash = 0
+positions = {}
+
+
+# ------------------------------------------------------------
+# TLAQ
+#
+# Native output:
+# TRADE / POSITION DELTAS
+#
+# The TLAQ adapter receives TLAQ's own virtual account state,
+# then converts its deltas to absolute desired positions before
+# they enter the Conductor portfolio.
+# ------------------------------------------------------------
+
+# [strategies.TLAQ]
+# result_mode = "position_deltas"
+# route_id = "windows_ibkr"
+
+# cwd = "C:/Users/mglas/Documents/trading/TLAQ"
+
+# command = [
+#     "uv",
+#     "run",
+#     "python",
+#     "conductor_adapter.py"
+# ]
+
+# timeout_seconds = 600
+# max_gross_leverage = 1.5
+
+# [strategies.TLAQ.seed]
+
+# # Negative is perfectly valid:
+# # it means TLAQ begins with financing/margin usage.
+# cash = 0
+
+# positions = {}

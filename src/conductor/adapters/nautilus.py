@@ -40,4 +40,4 @@ def main() -> None:
         raise SystemExit(2) from exc
     print(f"NAUTILUS BRIDGE: RUNTIME FOUND — nautilus_trader {installed}")
     print("Conductor domain model remains independent of Nautilus runtime types.")
-    print("Live capital routing is intentionally disabled in V0.2.")
+    print("Use paper/shadow mode first; V0.4 can route through the persistent Nautilus worker.")

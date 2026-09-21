@@ -1,202 +1,270 @@
 # Conductor
 
-Conductor is the portfolio control plane for independent trading strategies.
+Conductor is the portfolio control plane and strategy runtime for independent trading strategies.
 
-> **Strategies publish desired economic state. Conductor owns capital, implementation, risk,
-> reconciliation, execution, and economic ownership.**
+> **Strategies decide desired economic state. Conductor owns strategy accounts, capital, portfolio
+> risk, economic ownership, netting, audit, and desired broker state. NautilusTrader owns the
+> broker/exchange execution plumbing.**
 
-Conductor is not a strategy framework. ETSA, RPSchteroids, Futurescope, Crypto YOLO, CleanCarry,
-and later strategies remain independent research/production projects. NautilusTrader remains the
-intended lower-level execution/runtime kernel where it fits; Conductor owns the portfolio above it.
+The first production migration is the Windows equities runtime: **ETSA + RPSchteroids + TLAQ**, all
+sharing one Interactive Brokers account while retaining separate virtual positions and cash.
 
-## V0.3 — Target Snapshot Protocol
+## V0.4 alpha — Dagster migration runtime
 
-V0.3 replaces the loose external `StrategyIntent` boundary with one versioned Conductor protocol.
-There is **not** an ETSA schema, RPS schema, YOLO schema, etc. Strategies use thin producer-side
-adapters to publish one of two economic snapshot families:
-
-- `LinearTargetSnapshot`: complete signed target weights relative to strategy capital;
-- `StructureTargetSnapshot`: complete desired spreads/pairs/options structures with leg ratios and
-  structure-level risk intent.
-
-The internal V0.2 portfolio kernel remains in place behind this boundary.
+V0.4 builds on the frozen V0.3 Target Snapshot Protocol and adds the operational path needed to move
+these three demonstrated strategies from Dagster to Conductor.
 
 ```text
-Strategy repo
-   native model / signal / portfolio logic
-                 |
-                 v
-          conductor producer SDK
-                 |
-       complete target snapshot
-                 |
-                 v
-       atomic local JSON inbox
-                 |
-                 v
- schema + StrategyProfile validation
-                 |
-                 v
- immutable intent event + desired book state
-                 |
-                 v
-      capital / quantity resolution
-                 |
-                 v
-        portfolio risk + netting
-                 |
-                 v
- desired broker state <-> actual broker state
-                 |
-                 v
-             execution
-                 |
-                 v
-       committed virtual ownership
+Windows Task Scheduler
+        |
+        v
+conductor run <strategy>
+        |
+        +--> strategy-specific account snapshot
+        |       positions + virtual cash + allocated capital
+        |
+        +--> existing strategy subprocess
+        |       ETSA          -> target weights
+        |       RPSchteroids  -> absolute target shares
+        |       TLAQ          -> share deltas
+        |
+        +--> normalize to absolute desired strategy state
+        +--> portfolio risk / sleeve rebalance policy
+        +--> internal crossing across virtual strategy books
+        +--> aggregate desired IBKR position
+        |
+        v
+local SQLite/WAL bridge
+        |
+        v
+persistent NautilusTrader worker
+        |
+        v
+official Nautilus Interactive Brokers adapter
+        |
+        v
+TWS / IB Gateway
 ```
 
-See [`docs/TARGET_SNAPSHOT_PROTOCOL.md`](docs/TARGET_SNAPSHOT_PROTOCOL.md) for the frozen V1
-semantics implemented in this release.
+### Why the Nautilus worker is persistent
 
-## Key V0.3 properties
+`conductor run ETSA` is intentionally a short-lived Task Scheduler process. It should not open a new
+TWS connection, reconstruct order state, and reconnect to market data every time a strategy runs.
+One long-lived Nautilus worker owns the IBKR connection and continuously publishes broker state into
+a local durable bridge. The one-shot Conductor process reads that state and, in live mode, submits
+an aggregate execution request through the bridge.
 
-- replacement identity is `(strategy_id, book_id)`;
-- snapshots are **complete desired state**, never diffs;
-- absent targets in a newer snapshot become zero;
-- an empty complete snapshot is a normal flatten;
-- `(source, event_id)` replay is idempotent;
-- same event ID with a different payload hard-rejects;
-- inbox publishing never overwrites an unprocessed event ID;
-- revisions are monotonic; revision gaps are allowed;
-- a book cannot silently change protocol family across revisions;
-- duplicate/revision checks and desired-state replacement are transactional in SQLite;
-- Pydantic models forbid unknown fields and generate committed JSON Schemas;
-- strategy permissions/staleness live in Conductor-owned `StrategyProfile`, not in strategy payloads;
-- accepted desired state is checked for freshness again before execution;
-- the V0.2 virtual ledger migrates from `(strategy, instrument)` to
-  `(strategy, book, instrument)`, assigning existing rows to `book_id="main"`;
-- local file transport is atomic and works on Windows and Lubuntu;
-- structure snapshots are validated/stored in V0.3 but are **not executable yet**.
+There is no Redis, RabbitMQ, or network service between them. Both processes run on the same Windows
+machine and use SQLite in WAL mode.
 
-## Producer example
+## Shared-account virtual ownership
 
-ETSA and RPSchteroids use the same linear contract:
-
-```python
-from datetime import datetime, timezone
-from conductor.protocol.sdk import FilesystemConductorClient
-
-client = FilesystemConductorClient(r"C:\Trading\Conductor\runtime\inbox")
-client.submit_linear(
-    strategy_id="ETSA",
-    book_id="main",
-    revision=42,
-    as_of=datetime.now(timezone.utc),
-    targets={
-        "EQ.US.AAPL": "0.08",
-        "EQ.US.MSFT": "-0.06",
-        "EQ.US.NVDA": "0.04",
-    },
-)
-```
-
-Those are target weights inside ETSA's allocated capital budget. They are not trade deltas.
-Conductor resolves quantities and computes broker deltas itself.
-
-See `examples/etsa_producer.py`, `examples/rpschteroids_producer.py`, and
-`examples/futurescope_structure_producer.py`.
-
-## Demo
-
-Python 3.12+ is required. From either Windows or Lubuntu:
+IBKR only knows the physical account position. Conductor knows economic ownership:
 
 ```text
+TLAQ           AAPL +100     cash -$12,000
+RPSchteroids   AAPL  +50     cash  +$5,000
+-------------------------------------------
+IBKR physical  AAPL +150
+```
+
+TLAQ receives only its own positions/cash when it runs. RPS receives only its own. Negative virtual
+cash is permitted and represents strategy financing.
+
+If TLAQ wants +20 AAPL while RPS reduces AAPL by 15 shares, Conductor internally transfers 15 shares
+between their virtual books and sends only **BUY 5 AAPL** to IBKR. Internal crosses and external fill
+settlements are both audited.
+
+## Native strategy contracts
+
+The migration does **not** rewrite the strategies just to satisfy Conductor.
+
+- ETSA: `target_weights` — target weights are sized against ETSA's persisted allocated capital.
+- RPSchteroids: `target_quantities` — absolute desired share positions.
+- TLAQ: `position_deltas` — deltas are applied exactly once to TLAQ's starting virtual position and
+  immediately converted to absolute Conductor targets.
+
+Delta semantics never escape the TLAQ adapter, so retries cannot double-buy.
+
+Example adapters live in [`examples/migration`](examples/migration).
+
+## Execution boundary
+
+NautilusTrader is the primary IBKR backend in V0.4. Conductor does **not** implement its own TWS
+order/fill state machine.
+
+The persistent worker uses the official Nautilus Interactive Brokers data/execution clients and
+instrument provider. For the September migration, automatic canonical mapping is intentionally
+limited to US equities:
+
+```text
+AAPL             -> AAPL=STK.SMART
+EQ.US.AAPL       -> AAPL=STK.SMART
+```
+
+Futures and options will get explicit contract parsers rather than ambiguous string guessing.
+
+Nautilus receives one physical execution identity (`ConductorIbkr-001`) for the shared IB account.
+ETSA/RPS/TLAQ ownership remains in Conductor's virtual ledger. This avoids split ownership of the
+same net IBKR instrument inside Nautilus reconciliation.
+
+## Shadow mode is the default
+
+In the Windows template:
+
+```toml
+live_orders_enabled = false
+```
+
+In this mode Conductor can use current positions/NAV/prices published by the Nautilus worker and
+calculate the exact proposed aggregate broker trades, but it **does not enqueue execution requests**.
+This is the mode for Dagster-vs-Conductor comparison before cutover.
+
+For an additional safety layer during live-account shadowing, configure TWS/IB Gateway API access as
+read-only at the IB application itself.
+
+## Bootstrap scope is explicit
+
+Nautilus reconciliation requires the instruments referenced by broker reports to be loaded. The
+Windows route therefore has a bootstrap field:
+
+```toml
+preload_instruments = ["AAPL", "MSFT"]
+```
+
+Before cutover, every physical IBKR holding in the Conductor-controlled account must be either:
+
+1. present in a strategy's seeded virtual positions; or
+2. listed as a reconciliation-only `preload_instrument`.
+
+A non-zero preloaded position with no virtual owner makes `conductor doctor` fail. **No unmodeled
+account position is allowed at go-live.** Once Conductor has execution authority, manual trading in
+that account should be treated as an operational exception requiring explicit reconciliation.
+
+## Install
+
+Python 3.12+ and `uv` are recommended.
+
+Core + tests:
+
+```powershell
 uv venv --python 3.12
 uv pip install -e ".[dev]"
 uv run pytest -q
-uv run conductor-demo
 ```
 
-Or:
+Windows execution runtime:
 
-```text
-uv run conductor demo
+```powershell
+uv pip install -e ".[nautilus]"
 ```
 
-The demo is paper-only. It:
+Nautilus currently publishes pre-release 2.x wheels, so depending on the package version available
+on the machine you may need to allow pre-releases when installing it directly.
 
-1. has ETSA and RPS publish real V0.3 snapshot files;
-2. validates and accepts them into SQLite desired state;
-3. turns strategy-budget weights into quantities;
-4. nets overlapping AAPL ownership;
-5. reconciles a paper broker;
-6. publishes ETSA revision 2 with MSFT omitted;
-7. proves omission means zero and removes ETSA's MSFT exposure; and
-8. proves the next identical cycle creates zero trades.
+## Windows runtime commands
 
-Nothing in the demo connects to a live account.
+Copy [`examples/windows_etsa_rps_tlaq.toml`](examples/windows_etsa_rps_tlaq.toml) to
+`conductor.toml` and replace every placeholder before connecting to the production account.
 
-## Protocol tools
+Start the persistent execution worker:
 
-Validate a snapshot:
-
-```text
-uv run conductor validate path/to/snapshot.json
+```powershell
+uv run conductor nautilus-worker windows_ibkr_equities --config conductor.toml
 ```
 
-Regenerate JSON Schemas:
+Check it independently:
 
-```text
-uv run conductor schemas schemas
+```powershell
+uv run conductor worker-status windows_ibkr_equities --config conductor.toml
 ```
 
-Committed schemas:
+Run a strategy manually:
 
-- `schemas/linear-target-snapshot-v1.json`
-- `schemas/structure-target-snapshot-v1.json`
+```powershell
+uv run conductor run ETSA --config conductor.toml --trigger manual
+uv run conductor run RPSchteroids --config conductor.toml --trigger manual
+uv run conductor run TLAQ --config conductor.toml --trigger manual
+```
+
+Check virtual vs physical ownership:
+
+```powershell
+uv run conductor doctor --config conductor.toml
+```
+
+Show runtime/strategy state:
+
+```powershell
+uv run conductor status --config conductor.toml
+```
+
+Read-only local board (optional):
+
+```powershell
+uv pip install -e ".[dashboard]"
+uv run conductor dashboard --config conductor.toml
+```
+
+## Strategy lifecycle
+
+```powershell
+uv run conductor disable ETSA --config conductor.toml
+uv run conductor activate ETSA --config conductor.toml
+uv run conductor retire ETSA --config conductor.toml --confirm ETSA
+```
+
+`disable` preserves current ownership and blocks future runs. `retire` targets the strategy book to
+zero and only becomes retired after reconciliation. History is never deleted.
+
+## Capital allocation and risk
+
+The V0.4 alpha contains a common allocator interface for:
+
+- static allocation;
+- inverse-vol allocation;
+- ERC/risk-budget allocation with Ledoit-Wolf covariance;
+- deterministic fallbacks.
+
+For the September migration, persisted strategy capital is the sizing source and existing trusted
+allocations should remain static until strategy NAV/P&L history is cleanly attributable. The
+allocator implementations are present so we can switch later without changing strategy code.
+
+Portfolio risk currently supports deterministic gross and single-instrument caps and preserves the
+existing ETSA/RPS sleeve rebalance-band semantics before TLAQ cross-strategy netting. Every risk,
+rebalance, execution, accounting and lifecycle decision is written to the audit ledger.
+
+## Audit rule
+
+**Nothing important should exist only in memory or on the dashboard.**
+
+Conductor persists strategy runs, input account snapshots, native outputs, target revisions, risk
+changes, rebalance decisions, execution reports, internal crosses, external fill settlements,
+virtual cash changes, lifecycle transitions and bootstrap reconciliation checks. The local Nautilus
+bridge also persists request/response history.
 
 ## Deployment topology
 
-Conductor is one logical system with two independent runtime nodes:
+The Windows and Lubuntu nodes are on different networks and do not depend on each other.
 
 ```text
-Windows node                         Lubuntu node
-------------                         ------------
-Equities                             Crypto
-Futures
-Options
-
-IBKR / Windows adapters              Hyperliquid / crypto adapters
-Windows service/task plumbing        systemd service/timer plumbing
-local durable state                  local durable state
+Windows node                           Lubuntu node
+------------                           ------------
+Equities/futures/options               Crypto
+local Conductor state                  local Conductor state
+persistent execution worker            local crypto runtime
+IBKR                                   Hyperliquid
+local dashboard                         local dashboard
 ```
 
-Both nodes use the same protocol, portfolio semantics, ledger model, and risk vocabulary. Each node
-must remain safe and operable with local state; a future global portfolio view can aggregate the two
-without making either machine depend on a shared database to trade safely.
+A future global dashboard should receive outbound telemetry from each node. It must never become an
+execution dependency or shared source of truth.
 
-## NautilusTrader boundary
+## Migration guide
 
-NautilusTrader remains optional:
+See [`docs/WINDOWS_ETSA_RPS_TLAQ_MIGRATION.md`](docs/WINDOWS_ETSA_RPS_TLAQ_MIGRATION.md) for the
+paper smoke, live-account shadow, Task Scheduler setup, bootstrap/reconciliation procedure, failure
+drills, and cutover checklist.
 
-```text
-uv pip install -e ".[nautilus]"
-uv run conductor-nautilus-smoke
-```
-
-Conductor's domain and protocol do not depend on Nautilus types. This lets the Windows node use a
-Windows-appropriate execution adapter while the Lubuntu crypto node can use Nautilus/Hyperliquid
-where appropriate.
-
-## What V0.3 deliberately does not do
-
-- live broker/exchange routing;
-- structure-to-leg quantity sizing;
-- options lifecycle/Greeks translation;
-- futures spread lifecycle/roll management;
-- cross-node shared execution state;
-- full canonical instrument registry enforcement;
-- strategy P&L/cost-basis attribution.
-
-Those remain portfolio/runtime milestones. The protocol boundary is now stable enough to build them
-without requiring strategy repositories to know broker mechanics.
+The frozen V0.3 Target Snapshot Protocol remains documented in
+[`docs/TARGET_SNAPSHOT_PROTOCOL.md`](docs/TARGET_SNAPSHOT_PROTOCOL.md).

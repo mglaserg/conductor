@@ -79,3 +79,24 @@ def test_intent_book_uses_latest_revision_and_rejects_stale() -> None:
     stale = StrategyIntent("RPS", {"AAPL": Decimal("1")}, as_of=now - timedelta(hours=2))
     with pytest.raises(StaleIntentError):
         book.resolve([stale], now=now)
+
+
+def test_instrument_specs_can_be_resolved_lazily() -> None:
+    calls = []
+
+    def resolve(instrument):
+        calls.append(instrument)
+        return InstrumentSpec(instrument, Decimal("25"))
+
+    builder = PortfolioBuilder(portfolio_nav=Decimal("100000"), instrument_provider=resolve)
+    intent = StrategyIntent(
+        "RPS",
+        {"EQ.US.NEW": Decimal("12")},
+        ExposureType.QUANTITY,
+    )
+    targets = builder.build_virtual_targets([intent])
+    assert targets[0].target == Decimal("12")
+    assert calls == ["EQ.US.NEW"]
+    # Cached after first resolution.
+    builder.build_virtual_targets([intent])
+    assert calls == ["EQ.US.NEW"]

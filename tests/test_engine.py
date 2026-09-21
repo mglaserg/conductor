@@ -1,12 +1,17 @@
 from decimal import Decimal
 
+import pytest
+
 from conductor.adapters.paper import PaperExecutionAdapter
 from conductor.domain.models import (
     BrokerPosition,
+    ExecutionReport,
     ExposureType,
     InstrumentSpec,
+    RunState,
     SleeveAllocation,
     StrategyIntent,
+    TradeDelta,
 )
 from conductor.engine import ConductorEngine
 from conductor.ledger import ConductorLedger
@@ -53,3 +58,71 @@ def test_engine_commits_ownership_only_after_reconciliation_and_second_run_is_em
     second = engine.run_cycle(intents)
     assert second.reconciled
     assert second.deltas == ()
+
+
+class TerminalExecutionAdapter:
+    def __init__(self, *, status: str, filled_quantity: Decimal) -> None:
+        self.status = status
+        self.filled_quantity = filled_quantity
+        self.quantity = Decimal(50)
+
+    def positions(self) -> list[BrokerPosition]:
+        return [BrokerPosition("AAPL", self.quantity)]
+
+    def submit_deltas(self, deltas: list[TradeDelta]) -> list[ExecutionReport]:
+        delta = deltas[0]
+        self.quantity += self.filled_quantity
+        return [
+            ExecutionReport(
+                route_id=delta.route_id,
+                instrument=delta.instrument,
+                requested_quantity=delta.delta,
+                filled_quantity=self.filled_quantity,
+                avg_price=Decimal(100) if self.filled_quantity else None,
+                status=self.status,
+                order_id="terminal-order",
+            )
+        ]
+
+
+@pytest.mark.parametrize(
+    ("status", "filled_quantity"),
+    [("rejected", Decimal(0)), ("canceled", Decimal(20))],
+    ids=("rejected", "partial-then-canceled"),
+)
+def test_terminal_execution_failure_blocks_without_committing_virtual_ownership(
+    tmp_path, status: str, filled_quantity: Decimal
+) -> None:
+    nav = Decimal(100_000)
+    instruments = {"AAPL": InstrumentSpec("AAPL", Decimal(100))}
+    ledger = ConductorLedger(tmp_path / "blocked.sqlite")
+    ledger.seed_virtual_book(
+        strategy_id="ETSA",
+        book_id="main",
+        sleeve_id="equities",
+        route_id="default",
+        positions={"AAPL": Decimal(50)},
+    )
+    execution = TerminalExecutionAdapter(status=status, filled_quantity=filled_quantity)
+    engine = ConductorEngine(
+        portfolio=PortfolioBuilder(instruments=instruments, portfolio_nav=nav),
+        reconciler=DesiredStateReconciler(),
+        execution=execution,
+        risk=PortfolioRiskEngine(nav),
+        order_planner=OrderPlanner(portfolio_nav=nav, instruments=instruments),
+        ledger=ledger,
+    )
+    intent = StrategyIntent(
+        "ETSA",
+        {"AAPL": Decimal(100)},
+        ExposureType.QUANTITY,
+        sleeve_id="equities",
+    )
+
+    result = engine.run_cycle([intent])
+
+    assert result.state is RunState.BLOCKED
+    assert not result.reconciled
+    assert ledger.strategy_positions("ETSA") == {"AAPL": Decimal(50)}
+    completed = [event for event in ledger.events() if event["event_type"] == "run_completed"]
+    assert '"state": "blocked"' in completed[-1]["payload_json"]

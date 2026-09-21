@@ -49,6 +49,7 @@ class StrategyIntent:
     intent_id: str = field(default_factory=lambda: uuid4().hex)
     metadata: Mapping[str, str] = field(default_factory=dict)
     book_id: str = "main"
+    route_id: str = "default"
 
     def __post_init__(self) -> None:
         if not self.strategy_id.strip():
@@ -57,6 +58,8 @@ class StrategyIntent:
             raise ValueError("book_id must be non-empty")
         if not self.sleeve_id.strip():
             raise ValueError("sleeve_id must be non-empty")
+        if not self.route_id.strip():
+            raise ValueError("route_id must be non-empty")
         if self.revision < 1:
             raise ValueError("revision must be >= 1")
         if self.as_of.tzinfo is None:
@@ -75,12 +78,18 @@ class SleeveAllocation:
     sleeve_id: str
     strategy_weights: Mapping[str, Decimal]
     portfolio_weight: Decimal = ONE
+    leverage: Decimal = ONE
+    rebalance_band: Decimal = ZERO
 
     def __post_init__(self) -> None:
         if not self.sleeve_id.strip():
             raise ValueError("sleeve_id must be non-empty")
         if self.portfolio_weight < ZERO or self.portfolio_weight > ONE:
             raise ValueError("portfolio_weight must be between 0 and 1")
+        if self.leverage < ZERO:
+            raise ValueError("sleeve leverage cannot be negative")
+        if self.rebalance_band < ZERO or self.rebalance_band >= ONE:
+            raise ValueError("rebalance_band must be between 0 (inclusive) and 1")
         if any(weight < ZERO for weight in self.strategy_weights.values()):
             raise ValueError("strategy weights cannot be negative")
         total = sum(self.strategy_weights.values(), ZERO)
@@ -118,6 +127,7 @@ class CapitalBudget:
     strategy_id: str
     sleeve_nav: Decimal
     strategy_nav: Decimal
+    exposure_budget: Decimal
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +143,7 @@ class VirtualTarget:
     exposure_type: ExposureType = ExposureType.QUANTITY
     source_exposure_type: ExposureType = ExposureType.NAV_WEIGHT
     lot_size: Decimal = ONE
+    route_id: str = "default"
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,12 +152,14 @@ class AggregateTarget:
     target: Decimal  # quantity
     notional: Decimal
     exposure_type: ExposureType = ExposureType.QUANTITY
+    route_id: str = "default"
 
 
 @dataclass(frozen=True, slots=True)
 class BrokerPosition:
     instrument: str
     quantity: Decimal
+    route_id: str = "default"
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +169,19 @@ class TradeDelta:
     desired: Decimal
     delta: Decimal
     estimated_notional: Decimal = ZERO
+    route_id: str = "default"
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionReport:
+    route_id: str
+    instrument: str
+    requested_quantity: Decimal
+    filled_quantity: Decimal
+    avg_price: Decimal | None = None
+    commission: Decimal = ZERO
+    status: str = "filled"
+    order_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
