@@ -58,6 +58,9 @@ Windows equity strategies without rewriting their strategy logic.
 - strategy activate, disable, retire, status, doctor, and worker-status commands;
 - read-only local dashboard;
 - Windows Task Scheduler helpers and an operator migration runbook.
+- portable offline `run --paper`/`status --paper` execution with a separate SQLite source of truth,
+  durable synthetic broker state, deterministic marks, allocated/funded strategy books, and the
+  real configured subprocess/native-result boundary, without Nautilus or IBKR.
 
 ### Remaining promotion work
 

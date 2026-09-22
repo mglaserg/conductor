@@ -30,9 +30,19 @@ def main() -> None:
     run.add_argument("strategy_id")
     run.add_argument("--config", default="conductor.toml", type=Path)
     run.add_argument("--trigger", default="manual")
+    run.add_argument(
+        "--paper",
+        action="store_true",
+        help="use the separate offline synthetic-broker runtime and paper database",
+    )
 
     status = sub.add_parser("status", help="show node, strategy, ownership and recent-run state")
     status.add_argument("--config", default="conductor.toml", type=Path)
+    status.add_argument(
+        "--paper",
+        action="store_true",
+        help="inspect the separate offline paper database",
+    )
 
     doctor = sub.add_parser(
         "doctor", help="read-only bootstrap check: virtual ownership must equal broker positions"
@@ -134,10 +144,16 @@ def main() -> None:
             raise SystemExit(
                 "REFUSED: retirement can flatten positions; pass --confirm with the exact strategy ID"
             )
-        app = ConductorRuntimeApp.from_path(args.config)
+        app = ConductorRuntimeApp.from_path(
+            args.config,
+            paper=bool(getattr(args, "paper", False)),
+        )
         try:
             if args.command == "run":
-                outcome = app.run_strategy(args.strategy_id, trigger=args.trigger)
+                try:
+                    outcome = app.run_strategy(args.strategy_id, trigger=args.trigger)
+                except KeyError as exc:
+                    raise SystemExit(str(exc)) from exc
                 payload = {
                     "run_id": outcome.run_id,
                     "strategy_id": outcome.strategy_id,
@@ -175,28 +191,30 @@ def main() -> None:
                     raise SystemExit(3)
                 return
 
-            profile = app.config.strategies.get(args.strategy_id)
-            if profile is None:
-                raise SystemExit(f"unknown configured strategy: {args.strategy_id}")
+            try:
+                canonical_id = app.resolve_strategy_id(args.strategy_id)
+            except KeyError as exc:
+                raise SystemExit(str(exc)) from exc
+            profile = app.config.strategies[canonical_id]
             if args.command == "activate":
                 app.orchestrator.activate(profile)
-                print(f"ACTIVE {args.strategy_id}/{profile.book_id}")
+                print(f"ACTIVE {canonical_id}/{profile.book_id}")
                 return
             if args.command == "disable":
                 app.orchestrator.disable(profile)
-                print(f"DISABLED {args.strategy_id}/{profile.book_id}")
+                print(f"DISABLED {canonical_id}/{profile.book_id}")
                 return
             if args.command == "retire":
                 result = app.orchestrator.retire(profile)
                 print(
                     json.dumps(
                         {
-                            "strategy_id": args.strategy_id,
+                            "strategy_id": canonical_id,
                             "state": result.state.value,
                             "reconciled": result.reconciled,
                             "trade_count": len(result.deltas),
                             "lifecycle": app.ledger.strategy_lifecycle(
-                                args.strategy_id, book_id=profile.book_id
+                                canonical_id, book_id=profile.book_id
                             ),
                         },
                         indent=2,

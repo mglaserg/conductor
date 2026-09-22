@@ -36,17 +36,30 @@ class StrategySeed:
 
 
 @dataclass(frozen=True, slots=True)
+class PaperStrategySeed:
+    allocated_capital: Decimal | None
+    cash: Decimal | None
+    positions: dict[str, Decimal]
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeConfig:
     path: Path
     node_id: str
     state_db: Path
     run_root: Path
+    paper_state_db: Path
+    paper_run_root: Path
     portfolio_nav: Decimal | None
     nav_source_route: str | None
     routes: dict[str, RouteConfig]
     strategies: dict[str, StrategyRunnerProfile]
     seeds: dict[str, StrategySeed]
+    paper_seeds: dict[str, PaperStrategySeed]
     allocations: dict[str, SleeveAllocation]
+    allocation_method: str
+    allocation_weights: dict[str, Decimal]
+    paper_default_price: Decimal
     paper_prices: dict[str, Decimal]
     max_gross_leverage: Decimal
     max_instrument_nav: Decimal
@@ -62,6 +75,12 @@ def _resolve_path(base: Path, value: str) -> Path:
     return path if path.is_absolute() else (base / path).resolve()
 
 
+def _paper_db_path(state_db: Path) -> Path:
+    suffix = state_db.suffix or ".sqlite"
+    stem = state_db.stem if state_db.suffix else state_db.name
+    return state_db.with_name(f"{stem}.paper{suffix}")
+
+
 def load_runtime_config(path: str | Path) -> RuntimeConfig:
     config_path = Path(path).expanduser().resolve()
     base = config_path.parent
@@ -70,6 +89,21 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
     node_id = str(node.get("id", "windows"))
     state_db = _resolve_path(base, str(node.get("state_db", "data/conductor.sqlite")))
     run_root = _resolve_path(base, str(node.get("run_root", "data/runs")))
+    paper = raw.get("paper", {})
+    paper_state_raw = paper.get("state_db")
+    paper_run_root_raw = paper.get("run_root")
+    paper_state_db = (
+        _resolve_path(base, str(paper_state_raw))
+        if paper_state_raw is not None
+        else _paper_db_path(state_db)
+    )
+    if paper_state_db == state_db:
+        raise ValueError("paper.state_db must be different from node.state_db")
+    paper_run_root = (
+        _resolve_path(base, str(paper_run_root_raw))
+        if paper_run_root_raw is not None
+        else run_root / "paper"
+    )
     portfolio_nav_raw = node.get("portfolio_nav")
     portfolio_nav = Decimal(str(portfolio_nav_raw)) if portfolio_nav_raw is not None else None
     nav_source_route = node.get("nav_source_route")
@@ -112,6 +146,7 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
 
     strategies: dict[str, StrategyRunnerProfile] = {}
     seeds: dict[str, StrategySeed] = {}
+    paper_seeds: dict[str, PaperStrategySeed] = {}
     for strategy_id, item in raw.get("strategies", {}).items():
         cwd = _resolve_path(base, str(item["cwd"]))
         profile = StrategyRunnerProfile(
@@ -135,6 +170,23 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
                 for instrument, quantity in seed.get("positions", {}).items()
             },
         )
+        paper_seed = item.get("paper_seed", {})
+        paper_seeds[strategy_id] = PaperStrategySeed(
+            allocated_capital=(
+                Decimal(str(paper_seed["allocated_capital"]))
+                if "allocated_capital" in paper_seed
+                else None
+            ),
+            cash=Decimal(str(paper_seed["cash"])) if "cash" in paper_seed else None,
+            positions={
+                str(instrument): Decimal(str(quantity))
+                for instrument, quantity in paper_seed.get("positions", {}).items()
+            },
+        )
+
+    casefolded_ids = [strategy_id.casefold() for strategy_id in strategies]
+    if len(casefolded_ids) != len(set(casefolded_ids)):
+        raise ValueError("configured strategy IDs must be unique ignoring case")
 
     allocations: dict[str, SleeveAllocation] = {}
     for sleeve_id, item in raw.get("sleeves", {}).items():
@@ -151,21 +203,42 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
 
     risk = raw.get("risk", {})
     execution = raw.get("execution", {})
+    portfolio = raw.get("portfolio", {})
+    static = portfolio.get("static", {})
+    allocation_weights = {
+        str(strategy): Decimal(str(weight))
+        for strategy, weight in static.get("weights", {}).items()
+    }
+    paper_default_price = Decimal(str(paper.get("default_price", "100")))
+    paper_prices = {
+        str(instrument): Decimal(str(price))
+        for instrument, price in raw.get("paper_prices", {}).items()
+    }
+    if paper_default_price <= 0:
+        raise ValueError("paper.default_price must be positive")
+    invalid_paper_prices = [name for name, price in paper_prices.items() if price <= 0]
+    if invalid_paper_prices:
+        raise ValueError(
+            "paper prices must be positive: " + ", ".join(sorted(invalid_paper_prices))
+        )
     return RuntimeConfig(
         path=config_path,
         node_id=node_id,
         state_db=state_db,
         run_root=run_root,
+        paper_state_db=paper_state_db,
+        paper_run_root=paper_run_root,
         portfolio_nav=portfolio_nav,
         nav_source_route=str(nav_source_route) if nav_source_route is not None else None,
         routes=routes,
         strategies=strategies,
         seeds=seeds,
+        paper_seeds=paper_seeds,
         allocations=allocations,
-        paper_prices={
-            str(instrument): Decimal(str(price))
-            for instrument, price in raw.get("paper_prices", {}).items()
-        },
+        allocation_method=str(portfolio.get("allocator", "static")),
+        allocation_weights=allocation_weights,
+        paper_default_price=paper_default_price,
+        paper_prices=paper_prices,
         max_gross_leverage=Decimal(str(risk.get("max_gross_leverage", "1.5"))),
         max_instrument_nav=Decimal(str(risk.get("max_instrument_nav", "0.20"))),
         min_trade_nav_bps=Decimal(str(execution.get("min_trade_nav_bps", "1"))),

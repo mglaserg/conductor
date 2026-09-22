@@ -1,0 +1,43 @@
+# Portable, broker-free smoke configuration. This is synthetic test data only.
+
+[node]
+id = "offline-paper-smoke"
+state_db = "../data/offline-paper-smoke.sqlite"
+run_root = "../data/offline-paper-smoke-runs"
+portfolio_nav = 100000
+
+[portfolio]
+allocator = "static"
+
+[portfolio.static.weights]
+ETSA = 0.40
+RPSchteroids = 0.15
+TLAQ = 0.45
+
+[paper]
+default_price = 100
+
+[risk]
+max_gross_leverage = 2
+max_instrument_nav = 1
+
+[execution]
+min_trade_nav_bps = 0
+
+[strategies.ETSA]
+result_mode = "target_weights"
+route_id = "offline"
+cwd = "."
+command = ["python", "offline_paper_target.py"]
+
+[strategies.RPSchteroids]
+result_mode = "target_weights"
+route_id = "offline"
+cwd = "."
+command = ["python", "offline_paper_target.py"]
+
+[strategies.TLAQ]
+result_mode = "target_weights"
+route_id = "offline"
+cwd = "."
+command = ["python", "offline_paper_target.py"]

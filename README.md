@@ -123,6 +123,58 @@ This is the mode for Dagster-vs-Conductor comparison before cutover.
 For an additional safety layer during live-account shadowing, configure TWS/IB Gateway API access as
 read-only at the IB application itself.
 
+## Offline paper mode (Windows or Lubuntu)
+
+Offline paper mode exercises the configured strategy subprocess, `CONDUCTOR_OUTPUT` native-result
+adapter, target normalization, portfolio/risk path, accounting, fills, reconciliation, and audit
+without starting Nautilus, TWS, IB Gateway, or any persistent worker:
+
+```powershell
+uv run conductor run etsa --paper --config conductor.toml
+uv run conductor run RPSchteroids --paper --config conductor.toml
+uv run conductor status --paper --config conductor.toml
+```
+
+This is a separate runtime, not shadow mode with submission suppressed. By default it uses
+`data/conductor.paper.sqlite` when normal state is `data/conductor.sqlite`, and paper run artifacts
+go under `data/runs/paper`. Synthetic broker positions and fills are durable in the paper database.
+The configured live routes are never constructed or contacted.
+
+Configure deterministic offline marks and allocation as follows:
+
+```toml
+[node]
+portfolio_nav = 100000
+
+[portfolio]
+allocator = "static"
+
+[portfolio.static.weights]
+ETSA = 0.40
+RPSchteroids = 0.15
+TLAQ = 0.45
+
+[paper]
+default_price = 100
+
+[paper_prices]
+"EQ.US.AAPL" = 250
+```
+
+A new paper book receives its allocated capital as both allocated capital and initial paper cash.
+For an explicit bootstrap override, use `strategies.<id>.paper_seed` with optional
+`allocated_capital`, `cash`, and `positions`. Normal `seed` values remain isolated from paper state.
+The same configuration and commands are portable to Lubuntu; only each strategy's configured
+`cwd` and `command` need to be valid on that node.
+
+For a harmless installation smoke before wiring real strategy repositories, use
+[`examples/offline_paper_smoke.toml`](examples/offline_paper_smoke.toml):
+
+```powershell
+uv run conductor run etsa --paper --config examples/offline_paper_smoke.toml
+uv run conductor status --paper --config examples/offline_paper_smoke.toml
+```
+
 ## Bootstrap scope is explicit
 
 Nautilus reconciliation requires the instruments referenced by broker reports to be loaded. The

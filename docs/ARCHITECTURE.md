@@ -74,6 +74,12 @@ The paper implementation is synchronous and local. The live IBKR implementation 
 
 Conductor intentionally does not implement a parallel TWS order/fill state machine.
 
+CLI `--paper` selects a fully offline execution composition before routes are built. It opens a
+separate Conductor ledger, substitutes every configured strategy route with a durable synthetic
+broker backed by that ledger, and prices instruments from deterministic paper configuration. It
+does not construct the Nautilus bridge adapter. This portable composition is available on Windows
+and Lubuntu and is distinct from live-account shadow mode.
+
 ## Strategy-run sequence
 
 ```text

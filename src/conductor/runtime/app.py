@@ -6,10 +6,11 @@ from pathlib import Path
 
 from conductor.accounting import VirtualAccountingEngine
 from conductor.adapters.nautilus_bridge import NautilusBridgeExecutionAdapter
-from conductor.adapters.paper import PaperExecutionAdapter
+from conductor.adapters.paper import DurablePaperExecutionAdapter, PaperExecutionAdapter
 from conductor.adapters.router import RoutedExecutionAdapter
+from conductor.allocation import FallbackAllocator
 from conductor.config import RuntimeConfig, load_runtime_config
-from conductor.domain.models import AggregateTarget, BrokerPosition, InstrumentSpec, ZERO
+from conductor.domain.models import ZERO, AggregateTarget, BrokerPosition, InstrumentSpec
 from conductor.engine import ConductorEngine
 from conductor.ledger import ConductorLedger
 from conductor.orders import OrderPlanner
@@ -21,55 +22,111 @@ from conductor.runtime.orchestrator import StrategyRunOrchestrator, StrategyRunO
 
 
 class ConductorRuntimeApp:
-    def __init__(self, config: RuntimeConfig) -> None:
+    def __init__(self, config: RuntimeConfig, *, paper: bool = False) -> None:
         self.config = config
-        config.state_db.parent.mkdir(parents=True, exist_ok=True)
-        config.run_root.mkdir(parents=True, exist_ok=True)
-        self.ledger = ConductorLedger(config.state_db)
+        self.paper_mode = paper
+        self.state_db = config.paper_state_db if paper else config.state_db
+        self.run_root = config.paper_run_root if paper else config.run_root
+        self.state_db.parent.mkdir(parents=True, exist_ok=True)
+        self.run_root.mkdir(parents=True, exist_ok=True)
+        self.ledger = ConductorLedger(self.state_db)
+
+        paper_nav = self._configured_paper_nav() if paper else None
+        allocation_decision = self._paper_allocation() if paper else None
+        initialized_accounts: list[dict[str, str]] = []
 
         for strategy_id, profile in config.strategies.items():
             self.ledger.ensure_strategy(strategy_id, book_id=profile.book_id)
             if self.ledger.strategy_account(strategy_id, book_id=profile.book_id) is None:
-                seed = config.seeds[strategy_id]
+                if paper:
+                    assert paper_nav is not None and allocation_decision is not None
+                    seed = config.paper_seeds[strategy_id]
+                    allocated_capital = (
+                        seed.allocated_capital
+                        if seed.allocated_capital is not None
+                        else paper_nav * allocation_decision.weights.get(strategy_id, ZERO)
+                    )
+                    cash = seed.cash if seed.cash is not None else allocated_capital
+                    positions = seed.positions
+                else:
+                    seed = config.seeds[strategy_id]
+                    allocated_capital = seed.allocated_capital
+                    cash = seed.cash
+                    positions = seed.positions
                 self.ledger.seed_strategy_account(
                     strategy_id,
                     book_id=profile.book_id,
                     route_id=profile.route_id,
-                    allocated_capital=seed.allocated_capital,
-                    cash=seed.cash,
+                    allocated_capital=allocated_capital,
+                    cash=cash,
                 )
                 self.ledger.seed_virtual_book(
                     strategy_id=strategy_id,
                     book_id=profile.book_id,
                     sleeve_id=profile.sleeve_id,
                     route_id=profile.route_id,
-                    positions=seed.positions,
+                    positions=positions,
                 )
+                initialized_accounts.append(
+                    {
+                        "strategy_id": strategy_id,
+                        "book_id": profile.book_id,
+                        "allocated_capital": str(allocated_capital),
+                        "initial_cash": str(cash),
+                    }
+                )
+
+        if paper and initialized_accounts:
+            assert allocation_decision is not None
+            self.ledger.append_event(
+                "paper.allocation_decision",
+                {
+                    "configured_method": config.allocation_method,
+                    "resolved_method": allocation_decision.method,
+                    "weights": {
+                        key: str(value) for key, value in allocation_decision.weights.items()
+                    },
+                    "diagnostics": dict(allocation_decision.diagnostics),
+                    "accounts": initialized_accounts,
+                },
+            )
 
         self.route_adapters: dict[str, object] = {}
         lazy_providers: dict[str, object] = {}
-        for route_id, route_cfg in config.routes.items():
-            adapter_name = route_cfg.route.adapter.lower()
-            if adapter_name == "paper":
-                self.route_adapters[route_id] = PaperExecutionAdapter(
-                    self._paper_broker_positions(route_id)
-                )
-            elif adapter_name == "nautilus_ibkr":
-                if route_cfg.bridge_db is None:
-                    raise ValueError(f"route {route_id} requires bridge_db")
-                adapter = NautilusBridgeExecutionAdapter(
-                    bridge_db=route_cfg.bridge_db,
+        if paper:
+            paper_routes = sorted({profile.route_id for profile in config.strategies.values()})
+            for route_id in paper_routes:
+                self.route_adapters[route_id] = DurablePaperExecutionAdapter(
+                    ledger=self.ledger,
                     route_id=route_id,
-                    live_orders_enabled=route_cfg.live_orders_enabled,
-                    worker_stale_after_seconds=route_cfg.worker_stale_after_seconds,
-                    request_timeout_seconds=route_cfg.request_timeout_seconds,
+                    price_provider=self._paper_price,
+                    initial_positions=self._paper_broker_positions(route_id),
                 )
-                self.route_adapters[route_id] = adapter
-                lazy_providers[route_id] = adapter.instrument_spec
-            else:
-                raise ValueError(f"unsupported adapter {route_cfg.route.adapter!r}")
+        else:
+            for route_id, route_cfg in config.routes.items():
+                adapter_name = route_cfg.route.adapter.lower()
+                if adapter_name == "paper":
+                    self.route_adapters[route_id] = PaperExecutionAdapter(
+                        self._paper_broker_positions(route_id)
+                    )
+                elif adapter_name == "nautilus_ibkr":
+                    if route_cfg.bridge_db is None:
+                        raise ValueError(f"route {route_id} requires bridge_db")
+                    adapter = NautilusBridgeExecutionAdapter(
+                        bridge_db=route_cfg.bridge_db,
+                        route_id=route_id,
+                        live_orders_enabled=route_cfg.live_orders_enabled,
+                        worker_stale_after_seconds=route_cfg.worker_stale_after_seconds,
+                        request_timeout_seconds=route_cfg.request_timeout_seconds,
+                    )
+                    self.route_adapters[route_id] = adapter
+                    lazy_providers[route_id] = adapter.instrument_spec
+                else:
+                    raise ValueError(f"unsupported adapter {route_cfg.route.adapter!r}")
 
         def resolve_spec(instrument: str) -> InstrumentSpec:
+            if paper:
+                return InstrumentSpec(instrument, self._paper_price(instrument))
             # A canonical instrument must resolve on exactly one local route for V0.4.
             candidate_routes = {
                 profile.route_id
@@ -95,6 +152,9 @@ class ConductorRuntimeApp:
             instrument = row["instrument"]
             if instrument in initial_specs:
                 continue
+            if paper:
+                initial_specs[instrument] = resolve_spec(instrument)
+                continue
             provider = lazy_providers.get(row["route_id"])
             if provider is None:
                 raise KeyError(
@@ -102,7 +162,7 @@ class ConductorRuntimeApp:
                 )
             initial_specs[instrument] = provider(instrument)  # type: ignore[operator]
 
-        portfolio_nav = self._portfolio_nav()
+        portfolio_nav = paper_nav if paper_nav is not None else self._portfolio_nav()
         def strategy_capital(_sleeve_id: str, strategy_id: str, book_id: str) -> Decimal:
             account = self.ledger.strategy_account(strategy_id, book_id=book_id)
             if account is None:
@@ -145,9 +205,35 @@ class ConductorRuntimeApp:
             ledger=self.ledger,
             accounting=self.accounting,
             engine=self.engine,
-            run_root=config.run_root,
+            run_root=self.run_root,
             profiles=config.strategies,
         )
+
+    def _configured_paper_nav(self) -> Decimal:
+        if self.config.portfolio_nav is None:
+            raise ValueError("paper mode requires node.portfolio_nav")
+        return self.config.portfolio_nav
+
+    def _paper_allocation(self):
+        configured = self.config.allocation_weights
+        if not configured:
+            configured = {
+                strategy_id: seed.allocated_capital
+                for strategy_id, seed in self.config.seeds.items()
+                if seed.allocated_capital > ZERO
+            }
+        if not configured:
+            raise ValueError(
+                "paper mode requires [portfolio.static.weights] or positive strategy seed capital"
+            )
+        return FallbackAllocator().allocate(
+            self.config.allocation_method,
+            configured=configured,
+            returns=None,
+        )
+
+    def _paper_price(self, instrument: str) -> Decimal:
+        return self.config.paper_prices.get(instrument, self.config.paper_default_price)
 
     def _portfolio_nav(self) -> Decimal:
         if self.config.nav_source_route:
@@ -173,14 +259,22 @@ class ConductorRuntimeApp:
         ]
 
     @classmethod
-    def from_path(cls, path: str | Path) -> "ConductorRuntimeApp":
-        return cls(load_runtime_config(path))
+    def from_path(cls, path: str | Path, *, paper: bool = False) -> ConductorRuntimeApp:
+        return cls(load_runtime_config(path), paper=paper)
+
+    def resolve_strategy_id(self, strategy_id: str) -> str:
+        matches = [
+            configured
+            for configured in self.config.strategies
+            if configured.casefold() == strategy_id.casefold()
+        ]
+        if len(matches) != 1:
+            raise KeyError(f"unknown configured strategy: {strategy_id}")
+        return matches[0]
 
     def run_strategy(self, strategy_id: str, *, trigger: str = "manual") -> StrategyRunOutcome:
-        try:
-            profile = self.config.strategies[strategy_id]
-        except KeyError as exc:
-            raise KeyError(f"unknown configured strategy: {strategy_id}") from exc
+        canonical_id = self.resolve_strategy_id(strategy_id)
+        profile = self.config.strategies[canonical_id]
         return self.orchestrator.run(profile, trigger=trigger)
 
     def status(self) -> dict:
@@ -210,12 +304,24 @@ class ConductorRuntimeApp:
                     "target_as_of": None if current is None else current.as_of.isoformat(),
                 }
             )
-        return {
+        payload = {
             "node_id": self.config.node_id,
             "portfolio_nav": str(self.portfolio.portfolio_nav),
             "strategies": strategies,
             "recent_runs": self.ledger.strategy_runs(limit=20),
         }
+        if self.paper_mode:
+            payload["runtime_mode"] = "paper"
+            payload["state_db"] = str(self.state_db)
+            payload["paper_broker_positions"] = [
+                {
+                    "route_id": position.route_id,
+                    "instrument": position.instrument,
+                    "quantity": str(position.quantity),
+                }
+                for position in self.engine.execution.positions()
+            ]
+        return payload
 
     def bootstrap_reconciliation(self) -> dict:
         quantities: dict[tuple[str, str], Decimal] = defaultdict(lambda: ZERO)

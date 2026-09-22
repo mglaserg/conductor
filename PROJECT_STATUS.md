@@ -44,13 +44,18 @@ cutover checklist in `docs/WINDOWS_ETSA_RPS_TLAQ_MIGRATION.md` are satisfied.
 - shadow-by-default execution configuration;
 - strategy lifecycle, status, doctor, worker-status, and local dashboard commands;
 - Windows Task Scheduler scripts and migration adapters/runbook.
+- node-portable offline paper CLI runtime with a separate SQLite database, durable synthetic broker
+  positions/fills, configured static capital allocation, funded paper cash, deterministic prices,
+  real strategy subprocess/`CONDUCTOR_OUTPUT` execution, and no Nautilus/IBKR dependency;
+- case-insensitive CLI strategy lookup while preserving configured canonical IDs.
 
 These statements describe implemented code, not completed paper, shadow, or production validation.
 
 ## Verification state
 
-- The repository currently contains **48 automated tests** covering the protocol, ledger, portfolio,
-  risk, allocation, routing, accounting, bridge, orchestration, rebalance, and native-result paths.
+- The repository currently contains **51 automated tests** covering the protocol, ledger, portfolio,
+  risk, allocation, routing, accounting, bridge, orchestration, rebalance, native-result, and true
+  offline-paper runtime paths.
 - The V0.3 protocol foundation was tagged as `conductor-v0.3-target-snapshot-protocol`.
 - The documented environment workflow completed with `uv 0.12.17`: core `uv sync --extra dev`,
   followed by `uv sync --extra dev --extra nautilus --prerelease allow`.
@@ -63,6 +68,13 @@ These statements describe implemented code, not completed paper, shadow, or prod
   preserve committed ownership and broker state while recording a failed/timed-out run.
 - Unit tests verify that terminal rejection and partial-fill-then-cancel outcomes become blocked
   runs, return a non-success orchestration status, and do not commit virtual ownership.
+- Offline-paper tests verify separate durable state, case-insensitive strategy lookup, static
+  `$100,000` allocation to `$40,000`/`$15,000`/`$45,000`, funded initial cash, default and override
+  marks, real subprocess output normalization, durable synthetic fills, an empty unchanged second
+  run, and failure if paper mode attempts to construct the live Nautilus adapter.
+- An installed `conductor` entrypoint smoke using the committed harmless offline producer
+  reconciled one synthetic trade, exposed the durable paper broker position in `status --paper`,
+  and produced zero trades on the repeated unchanged run.
 - The V0.3 demo CLI passes an end-to-end smoke under a forced Windows CP-1252 output stream.
 - The current Ruff baseline is not clean; `ruff check src tests --statistics` reported 252 findings.
   The new failure-test module passes its focused Ruff check. Treat the remaining cleanup as
@@ -75,6 +87,9 @@ Never summarize the current state as production-ready.
 ## Real, paper, and synthetic boundaries
 
 - `PaperExecutionAdapter` and unit-test broker state are synthetic/local.
+- CLI `--paper` is a durable synthetic/local runtime in `conductor.paper.sqlite`; it is portable to
+  Windows and Lubuntu, never constructs a live route adapter, and is not evidence of IBKR paper
+  connectivity.
 - The Nautilus bridge and worker are real integration code but remain operationally unproven until
   exercised against the selected Nautilus build and IBKR paper environment.
 - `live_orders_enabled = false` is the required default and represents shadow/no-submit behavior.
@@ -102,6 +117,9 @@ Never summarize the current state as production-ready.
 8. The repository-wide lint baseline needs an intentional cleanup pass.
 9. The checked-out worktree contains substantial uncommitted V0.4 work; preserve unrelated changes
    and do not assume `HEAD` represents the alpha runtime shown in the files.
+10. The current machine's real ETSA paper invocation reaches its configured subprocess but cannot
+    launch `uv` (`WinError 5`); the referenced base Python installation is absent. Repair that
+    strategy environment before treating an ETSA adapter smoke as passed. No live route was opened.
 
 ## Next work, in priority order
 

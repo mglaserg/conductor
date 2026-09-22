@@ -170,6 +170,20 @@ class ConductorLedger:
                     validated_at TEXT NOT NULL,
                     PRIMARY KEY (canonical_id, route_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS paper_routes (
+                    route_id TEXT PRIMARY KEY,
+                    initialized_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS paper_broker_positions (
+                    route_id TEXT NOT NULL,
+                    instrument TEXT NOT NULL,
+                    quantity TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (route_id, instrument),
+                    FOREIGN KEY (route_id) REFERENCES paper_routes(route_id)
+                );
                 """
             )
             self._migrate_virtual_table(conn, "virtual_targets", targets=True)
@@ -1005,6 +1019,107 @@ class ConductorLedger:
                 (route_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def initialize_paper_route(
+        self, route_id: str, positions: dict[str, Decimal] | None = None
+    ) -> bool:
+        """Initialize durable synthetic broker state once for a paper route."""
+        now = datetime.now(timezone.utc).isoformat()
+        positions = positions or {}
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM paper_routes WHERE route_id=?", (route_id,)
+            ).fetchone()
+            if existing is not None:
+                return False
+            conn.execute(
+                "INSERT INTO paper_routes(route_id, initialized_at) VALUES (?, ?)",
+                (route_id, now),
+            )
+            conn.executemany(
+                """
+                INSERT INTO paper_broker_positions(route_id, instrument, quantity, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (route_id, instrument, str(quantity), now)
+                    for instrument, quantity in sorted(positions.items())
+                    if quantity != 0
+                ],
+            )
+            self._append_event_on_conn(
+                conn,
+                "paper.broker_initialized",
+                {
+                    "route_id": route_id,
+                    "positions": {key: str(value) for key, value in positions.items()},
+                },
+                now,
+            )
+        return True
+
+    def paper_broker_positions(self, route_id: str) -> dict[str, Decimal]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT instrument, quantity FROM paper_broker_positions
+                WHERE route_id=? ORDER BY instrument
+                """,
+                (route_id,),
+            ).fetchall()
+        return {row["instrument"]: Decimal(row["quantity"]) for row in rows}
+
+    def apply_paper_fill(
+        self,
+        *,
+        route_id: str,
+        instrument: str,
+        quantity: Decimal,
+        price: Decimal,
+        order_id: str,
+    ) -> Decimal:
+        """Atomically apply and audit one synthetic fill in the paper ledger."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT quantity FROM paper_broker_positions
+                WHERE route_id=? AND instrument=?
+                """,
+                (route_id, instrument),
+            ).fetchone()
+            before = Decimal(0) if row is None else Decimal(row["quantity"])
+            after = before + quantity
+            if after == 0:
+                conn.execute(
+                    "DELETE FROM paper_broker_positions WHERE route_id=? AND instrument=?",
+                    (route_id, instrument),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO paper_broker_positions(route_id, instrument, quantity, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(route_id, instrument) DO UPDATE SET
+                        quantity=excluded.quantity, updated_at=excluded.updated_at
+                    """,
+                    (route_id, instrument, str(after), now),
+                )
+            self._append_event_on_conn(
+                conn,
+                "paper.fill",
+                {
+                    "route_id": route_id,
+                    "instrument": instrument,
+                    "quantity": str(quantity),
+                    "price": str(price),
+                    "position_before": str(before),
+                    "position_after": str(after),
+                    "order_id": order_id,
+                },
+                now,
+            )
+        return after
 
     def record_run(self, run_id: str, *, state: str, reconciled: bool, details: dict) -> None:
         now = datetime.now(timezone.utc).isoformat()

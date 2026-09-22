@@ -43,6 +43,22 @@ RPSchteroids = 0.15
 TLAQ = 0.45
 
 
+# ------------------------------------------------------------
+# OFFLINE PAPER RUNTIME (WINDOWS OR LUBUNTU)
+#
+# `conductor run <strategy> --paper` never opens the configured
+# execution route. It uses data/conductor.paper.sqlite and this
+# deterministic fallback mark unless an instrument override exists.
+# ------------------------------------------------------------
+
+[paper]
+default_price = 100
+
+# Optional canonical-instrument overrides:
+# [paper_prices]
+# "EQ.US.AAPL" = 250
+
+
 # Configuration retained even when inactive, so changing allocator
 # is just a config change.
 

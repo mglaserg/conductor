@@ -24,6 +24,8 @@ class AllocationDecision:
 
 class StaticAllocator:
     def allocate(self, configured: Mapping[str, Decimal]) -> AllocationDecision:
+        if any(weight < 0 for weight in configured.values()):
+            raise AllocationError("static allocator weights cannot be negative")
         total = sum(configured.values(), Decimal("0"))
         if total <= 0:
             raise AllocationError("static allocator requires positive configured weights")

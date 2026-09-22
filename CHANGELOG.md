@@ -7,6 +7,12 @@ follow a lightweight Keep a Changelog structure and use repository tags as the h
 
 ### Added
 
+- True offline `run --paper` and `status --paper` runtime for Windows and Lubuntu, with a separate
+  SQLite ledger, durable synthetic broker positions/fills, deterministic default/override prices,
+  static capital allocation, funded initial strategy cash, and case-insensitive CLI strategy IDs.
+- End-to-end offline-paper coverage proving no Nautilus construction or live bridge request,
+  separate state, allocation/cash bootstrapping, price resolution, durable reconciliation, audit
+  evidence, and an empty repeated unchanged run.
 - V0.4 config-driven runtime for one-shot strategy subprocesses.
 - Native target-weight, target-quantity, and position-delta result adapters.
 - Persistent virtual strategy accounts, cash, positions, lifecycle, and run records.
