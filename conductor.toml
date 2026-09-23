@@ -14,8 +14,8 @@ id = "windows-main"
 state_db = "data/conductor.sqlite"
 run_root = "data/runs"
 
-# nav_source_route = "windows_ibkr"
-portfolio_nav = 100000
+# nav_source_route = "windows_ibkr_equities"
+# portfolio_nav = "broker"
 
 # ------------------------------------------------------------
 # PORTFOLIO CAPITAL ALLOCATION
@@ -29,7 +29,7 @@ portfolio_nav = 100000
 #   erc
 # ------------------------------------------------------------
 
-[portfolio]
+[portfolio.ibkr_main]
 allocator = "static"
 
 
@@ -37,11 +37,12 @@ allocator = "static"
 # These weights divide the Windows portfolio NAV among strategies.
 # Must sum to 1.0.
 
-[portfolio.static.weights]
-ETSA = 0.40
+[portfolio.ibkr_main.static.weights]
+ETSA = 0.85
 RPSchteroids = 0.15
-TLAQ = 0.45
 
+[portfolio.ibkr_tlaq.static.weights]
+TLAQ = 1.0
 
 # ------------------------------------------------------------
 # OFFLINE PAPER RUNTIME (WINDOWS OR LUBUNTU)
@@ -62,7 +63,7 @@ default_price = 100
 # Configuration retained even when inactive, so changing allocator
 # is just a config change.
 
-[portfolio.inverse_vol]
+[portfolio.ibkr_main.inverse_vol]
 lookback_days = 63
 estimator = "ewma"
 ewma_lambda = 0.94
@@ -74,7 +75,7 @@ max_weight = 0.70
 rebalance_threshold = 0.025
 
 
-[portfolio.erc]
+[portfolio.ibkr_main.erc]
 lookback_days = 126
 covariance = "ledoit_wolf"
 
@@ -136,7 +137,7 @@ min_trade_nav_bps = 1
 #   internal crossing
 # ------------------------------------------------------------
 
-[routes.windows_ibkr]
+[routes.ibkr_main]
 adapter = "nautilus_ibkr"
 
 account = "U20744719"
@@ -153,7 +154,39 @@ exec_client_id = 1302
 
 market_data_type = "REALTIME"
 
-bridge_db = "data/nautilus_ibkr_bridge.sqlite"
+bridge_db = "data/nautilus_ibkr_main_bridge.sqlite"
+instrument_cache_path = "data/ibkr_instruments.json"
+
+worker_stale_after_seconds = 15
+request_timeout_seconds = 60
+order_timeout_seconds = 30
+
+# START FALSE.
+live_orders_enabled = false
+
+# Existing physical IBKR positions outside the strategy bootstrap
+# can be listed here so Nautilus loads them during migration.
+preload_instruments = []
+
+
+[routes.ibkr_tlaq]
+adapter = "nautilus_ibkr"
+
+account = "U13562022"
+
+host = "127.0.0.1"
+
+# TWS:
+# paper = 7497
+# live  = 7496
+port = 7496
+
+data_client_id = 1311
+exec_client_id = 1312
+
+market_data_type = "REALTIME"
+
+bridge_db = "data/nautilus_ibkr_tlaq_bridge.sqlite"
 instrument_cache_path = "data/ibkr_instruments.json"
 
 worker_stale_after_seconds = 15
@@ -182,7 +215,7 @@ preload_instruments = []
 
 [strategies.ETSA]
 result_mode = "target_weights"
-route_id = "windows_ibkr"
+route_id = "ibkr_main"
 
 cwd = "C:/Users/mglas/Documents/trading/ETSA"
 
@@ -217,7 +250,7 @@ positions = {}
 
 [strategies.RPSchteroids]
 result_mode = "target_weights"
-route_id = "windows_ibkr"
+route_id = "ibkr_main"
 
 cwd = "C:/Users/mglas/Documents/trading/RPSchteroids"
 
@@ -247,26 +280,26 @@ positions = {}
 # they enter the Conductor portfolio.
 # ------------------------------------------------------------
 
-# [strategies.TLAQ]
-# result_mode = "position_deltas"
-# route_id = "windows_ibkr"
+[strategies.TLAQ]
+result_mode = "position_deltas"
+route_id = "ibkr_tlaq"
 
-# cwd = "C:/Users/mglas/Documents/trading/TLAQ"
+cwd = "C:/Users/mglas/Documents/trading/TLAQ"
 
-# command = [
-#     "uv",
-#     "run",
-#     "python",
-#     "conductor_adapter.py"
-# ]
+command = [
+    "uv",
+    "run",
+    "python",
+    "conductor_adapter.py"
+]
 
-# timeout_seconds = 600
-# max_gross_leverage = 1.5
+timeout_seconds = 600
+max_gross_leverage = 1.5
 
-# [strategies.TLAQ.seed]
+[strategies.TLAQ.seed]
 
-# # Negative is perfectly valid:
-# # it means TLAQ begins with financing/margin usage.
-# cash = 0
+# Negative is perfectly valid:
+# it means TLAQ begins with financing/margin usage.
+cash = 0
 
-# positions = {}
+positions = {}
