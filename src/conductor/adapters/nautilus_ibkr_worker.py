@@ -67,6 +67,62 @@ def _signed_position_qty(position: Any) -> Decimal:
     return -quantity if "SHORT" in side else quantity
 
 
+def _select_equity_value(equity: Any) -> Decimal | None:
+    """Select the headline account-equity value from Nautilus' equity result."""
+    if isinstance(equity, dict):
+        selected = None
+        for currency, money in equity.items():
+            if "USD" in str(currency).upper():
+                selected = money
+                break
+        if selected is None and len(equity) == 1:
+            selected = next(iter(equity.values()))
+        return _decimal(selected)
+    return _decimal(equity)
+
+
+def _resolve_account_net_liquidation(
+    portfolio: Any,
+    configured_account: str,
+    *,
+    account_id_type: Any,
+    venue_type: Any,
+) -> Decimal | None:
+    """Resolve NAV for one configured broker account.
+
+    Nautilus 2.x supports account-scoped Portfolio queries. Prefer those so two IBKR
+    accounts on the same venue can never be aggregated accidentally. Older venue-only
+    calls remain as a compatibility fallback for earlier 2.0 release candidates.
+    """
+    account_id = account_id_type(configured_account)
+
+    try:
+        nav = _select_equity_value(portfolio.equity(account_id=account_id))
+        if nav is not None:
+            return nav
+    except Exception:
+        pass
+
+    try:
+        account = portfolio.account(account_id=account_id)
+        if account is not None:
+            nav = _decimal(account.balance_total())
+            if nav is not None:
+                return nav
+    except Exception:
+        pass
+
+    for venue_name in ("INTERACTIVE_BROKERS", "SMART"):
+        try:
+            venue = venue_type.from_str(venue_name)
+            nav = _select_equity_value(portfolio.equity(venue=venue))
+            if nav is not None:
+                return nav
+        except Exception:
+            continue
+    return None
+
+
 @dataclass(slots=True)
 class _TrackedOrder:
     request_id: str
@@ -382,53 +438,47 @@ class _BridgeStrategyMixin:
                 broker_id=row.get("broker_id"),
             )
 
-        nav = None
-        for venue_name in ("INTERACTIVE_BROKERS", "SMART"):
-            try:
-                venue = Venue.from_str(venue_name)
-                equity = self.portfolio.equity(venue=venue)
-                if isinstance(equity, dict):
-                    # IB portfolios in this migration are USD based. Prefer USD if exposed,
-                    # otherwise accept the only returned currency.
-                    selected = None
-                    for currency, money in equity.items():
-                        if "USD" in str(currency).upper():
-                            selected = money
-                            break
-                    if selected is None and len(equity) == 1:
-                        selected = next(iter(equity.values()))
-                    nav = _decimal(selected)
-                else:
-                    nav = _decimal(equity)
-                if nav is not None:
-                    break
-            except Exception:
-                continue
-        if nav is None:
-            try:
-                account = self.cache.account_for_venue(Venue.from_str("INTERACTIVE_BROKERS"))
-                if account is None:
-                    account = self.cache.account_for_venue(Venue.from_str("SMART"))
-                if account is not None:
-                    nav = _decimal(account.balance_total())
-            except Exception:
-                nav = None
+        AccountId = types["AccountId"]
+        nav = _resolve_account_net_liquidation(
+            self.portfolio,
+            self._bridge_account,
+            account_id_type=AccountId,
+            venue_type=Venue,
+        )
+        if nav is None and ready:
+            ready = False
+            error = error or (
+                f"account state for {self._bridge_account} is loaded without NetLiquidation"
+            )
         self._bridge_store.heartbeat(
             self._bridge_route_id,
             ready=ready,
             net_liquidation=nav,
             account_id=self._bridge_account,
             error=error,
-            details={"live_orders_enabled": self._bridge_live},
+            details={
+                "live_orders_enabled": self._bridge_live,
+                "nav_source": "nautilus_portfolio_account",
+            },
         )
 
 
 def _import_nautilus() -> dict[str, Any]:
     # Keeping imports local lets the rest of Conductor (including strategy processes/tests) run
     # without installing the optional heavy Nautilus runtime.
-    from nautilus_trader.model import InstrumentId, OrderSide, OmsType, PriceType, StrategyId, TraderId, Venue
+    from nautilus_trader.model import (
+        AccountId,
+        InstrumentId,
+        OrderSide,
+        OmsType,
+        PriceType,
+        StrategyId,
+        TraderId,
+        Venue,
+    )
 
     return {
+        "AccountId": AccountId,
         "InstrumentId": InstrumentId,
         "OrderSide": OrderSide,
         "OmsType": OmsType,

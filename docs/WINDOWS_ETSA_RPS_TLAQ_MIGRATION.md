@@ -135,6 +135,10 @@ uv run conductor worker-status ibkr_main --config conductor.toml
 uv run conductor worker-status ibkr_tlaq --config conductor.toml
 ```
 
+Do not continue until both workers report `ready: true`, the configured account ID matches, and
+`net_liquidation` is non-null. The worker deliberately remains not-ready while IBKR account state
+is still loading.
+
 ## 4. Prepare the strategy adapters
 
 Copy the relevant templates from `examples/migration/` into the existing strategy repositories.

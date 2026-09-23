@@ -64,7 +64,7 @@ paper, shadow, or production validation.
 
 ## Verification state
 
-- Full automated suite on 2026-09-23: **59 passed**.
+- Full automated suite on 2026-09-23: **62 passed**.
 - New multi-account coverage verifies:
   - independent broker NAVs and 85/15 + 100% strategy budgeting;
   - exact strategy membership/weight validation per route;
@@ -72,7 +72,8 @@ paper, shadow, or production validation.
   - route-specific risk scaling and trade buffers;
   - route-scoped startup that does not construct an unrelated account adapter;
   - multi-account offline-paper NAV overrides without constructing live adapters;
-  - rejection of a Nautilus worker connected to the wrong configured account.
+  - rejection of a Nautilus worker connected to the wrong configured account;
+  - account-scoped Nautilus NAV lookup, account-balance fallback, and legacy venue fallback.
 - Existing tests continue to cover protocol, ledger, portfolio construction, accounting,
   orchestration, bridge behavior, failure handling, paper runtime and reconciliation.
 - `live_orders_enabled = false` remains the required default in the Windows configuration.

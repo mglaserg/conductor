@@ -46,6 +46,15 @@ follow a lightweight Keep a Changelog structure and use repository tags as the h
   expiry, and failure reports, including partial-fill-then-cancel coverage.
 - Windows CP-1252-compatible demo output and a console regression test.
 
+### Fixed
+
+- IBKR worker NAV publication now queries Nautilus by the configured account ID first, so
+  multi-account routes do not depend on ambiguous venue-scoped equity/cache lookups.
+- Workers no longer report `ready=true` while `NetLiquidation` is unavailable; startup remains
+  fail-closed until account NAV arrives.
+- Runtime bootstrap errors caused by unavailable broker NAV now return a concise `REFUSED:` CLI
+  diagnostic instead of a raw Python traceback.
+
 ### Changed
 
 - Static/inverse-vol/ERC selection and fallback are now configured per capital pool rather than as

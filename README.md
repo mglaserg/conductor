@@ -285,7 +285,9 @@ uv run conductor worker-status ibkr_tlaq --config conductor.toml
 ```
 
 `worker-status` also verifies that the worker-reported IBKR account matches the account configured
-for that route.
+for that route. It must show `ready: true` **and** a non-null `net_liquidation` before `doctor` or a
+live/shadow strategy run. During IBKR startup the worker stays not-ready until account state and NAV
+have arrived.
 
 Run a strategy manually:
 

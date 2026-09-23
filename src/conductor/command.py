@@ -166,11 +166,18 @@ def main() -> None:
                 raise SystemExit(f"unknown configured strategy: {args.strategy_id}")
             route_scope = {config.strategies[matches[0]].route_id}
 
-        app = ConductorRuntimeApp.from_path(
-            args.config,
-            paper=bool(getattr(args, "paper", False)),
-            route_scope=route_scope,
-        )
+        try:
+            app = ConductorRuntimeApp.from_path(
+                args.config,
+                paper=bool(getattr(args, "paper", False)),
+                route_scope=route_scope,
+            )
+        except Exception as exc:
+            from conductor.adapters.nautilus_bridge import NautilusBridgeError
+
+            if isinstance(exc, (NautilusBridgeError, ValueError)):
+                raise SystemExit(f"REFUSED: {exc}") from exc
+            raise
         try:
             if args.command == "run":
                 try:
