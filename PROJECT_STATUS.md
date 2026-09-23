@@ -67,7 +67,7 @@ paper, shadow, or production validation.
 
 ## Verification state
 
-- Full automated suite on 2026-09-23: **63 passed**.
+- Full automated suite on 2026-09-23: **66 passed**.
 - New multi-account coverage verifies:
   - independent broker NAVs and 85/15 + 100% strategy budgeting;
   - exact strategy membership/weight validation per route;
@@ -77,13 +77,16 @@ paper, shadow, or production validation.
   - multi-account offline-paper NAV overrides without constructing live adapters;
   - rejection of a Nautilus worker connected to the wrong configured account;
   - namespaced Nautilus `AccountId` resolution from the live cache before account-scoped NAV lookup;
+  - raw `NetLiquidation` extraction from the reported account event before portfolio valuation, so
+    an empty initial IB margin snapshot cannot trigger Nautilus's currency panic;
   - account-balance fallback and fail-closed behavior when the configured IB account is not the
     account registered in Nautilus.
 - Existing tests continue to cover protocol, ledger, portfolio construction, accounting,
   orchestration, bridge behavior, failure handling, paper runtime and reconciliation.
 - `live_orders_enabled = false` remains the required default in the Windows configuration.
-- No repository evidence yet establishes a successful **real IBKR multi-account paper connection**,
-  paper fill, live-account shadow comparison, or production cutover for this runtime.
+- Windows evidence now establishes that `ibkr_main` can start and `ibkr_tlaq` reaches the intended
+  TWS session and native IB account. Clean per-route NAV/readiness, paper fills, live-account shadow
+  comparison, and production cutover are still unproven.
 
 Never summarize the current state as production-ready.
 
@@ -102,10 +105,14 @@ Never summarize the current state as production-ready.
 
 ## Known gaps and risks
 
-1. The selected NautilusTrader build still needs import/connectivity proof on the actual Windows
-   trading machine.
-2. Both physical IBKR routes need paper worker smokes proving account-ID match, NAV, positions,
-   instruments, marks, restart recovery and stale-worker blocking.
+1. NautilusTrader `2.0.0rc4` has an upstream IB reconciliation defect in historical fill lookup:
+   it submits the namespaced Nautilus account ID (for example `IB-U123`) to IB instead of the
+   native account code. IB returns error 321. Keep `live_orders_enabled = false` until that fill
+   reconciliation path is fixed or Conductor moves to a verified patched Nautilus build.
+2. Both physical IBKR routes still need clean worker smokes proving non-null NAV, positions,
+   instruments, marks, restart recovery and stale-worker blocking. TLAQ now reaches its intended
+   TWS/account but its first observed AccountState had no typed balances and exposed the upstream
+   reconciliation defect above.
 3. Initial virtual positions and cash require human approval against the correct physical account.
 4. `max_margin_utilization` is represented in configuration/status but is **not yet enforced**;
    current worker state does not publish the required margin-utilization measurement.
@@ -123,7 +130,7 @@ Never summarize the current state as production-ready.
 
 ## Next work, in priority order
 
-1. Install/confirm the Nautilus extra and pass `conductor-nautilus-smoke` on the actual Windows
+1. Run plain `uv sync` and pass `conductor-nautilus-smoke` on the actual Windows
    trading machine.
 2. Start both IBKR paper workers and make both `worker-status` commands clean, including account-ID
    match.

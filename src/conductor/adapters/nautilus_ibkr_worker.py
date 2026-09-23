@@ -117,6 +117,55 @@ def _resolve_cached_account_id(
     return None
 
 
+def _account_event_net_liquidation(account: Any) -> Decimal | None:
+    """Read venue-reported NetLiquidation without invoking portfolio valuation.
+
+    IB's v2 adapter can publish an initial margin ``AccountState`` with no typed balances while
+    still preserving the raw account-summary fields in ``event.info``. Calling
+    ``Portfolio.equity`` against that half-initialized state can enter Rust valuation code which
+    requires a currency and abort the process. Prefer the venue's raw NetLiquidation field when
+    it is available.
+    """
+    try:
+        event = getattr(account, "last_event", None)
+        if callable(event):
+            event = event()
+        if event is None:
+            return None
+        info = getattr(event, "info", None)
+        if callable(info):
+            info = info()
+        if not info:
+            return None
+        for key in ("NetLiquidation", "NET_LIQUIDATION", "net_liquidation"):
+            try:
+                value = info.get(key)
+            except AttributeError:
+                try:
+                    value = info[key]
+                except Exception:
+                    continue
+            if value is not None:
+                nav = _decimal(value)
+                if nav is not None:
+                    return nav
+    except Exception:
+        return None
+    return None
+
+
+def _account_has_typed_balances(account: Any) -> bool | None:
+    """Return whether Nautilus has usable typed balances, or ``None`` if unknown."""
+    try:
+        balances = getattr(account, "balances", None)
+        if balances is None:
+            return None
+        balances = balances() if callable(balances) else balances
+        return bool(balances)
+    except Exception:
+        return None
+
+
 def _resolve_account_net_liquidation(
     portfolio: Any,
     configured_account: str,
@@ -125,15 +174,18 @@ def _resolve_account_net_liquidation(
     venue_type: Any,
     cache: Any | None = None,
 ) -> tuple[Decimal | None, Any | None, str | None]:
-    """Resolve NAV for one configured broker account.
+    """Resolve NAV for one configured broker account without crossing account boundaries.
 
     Prefer the authoritative account ID already registered in Nautilus' cache. IB accepts
     native account numbers in its adapter config, but Nautilus namespaces the resulting
     ``AccountId`` with the execution-client issuer (for example ``IB-U123``). Constructing
     ``AccountId("U123")`` is therefore both invalid and unsafe for multi-account routing.
 
-    The venue-only branch remains as a final compatibility fallback for old 2.0 release
-    candidates, but current workers should resolve an account-scoped ID first.
+    A live IB worker may briefly expose an account object before typed balances are populated.
+    In that state we read the raw venue-reported ``NetLiquidation`` from the account event when
+    possible and otherwise return not-ready. We deliberately do *not* call ``Portfolio.equity``
+    on an explicitly empty account because Nautilus 2.0.0rc4 can abort in Rust when currency
+    metadata is not yet available.
     """
     account_id = None
     if cache is not None:
@@ -157,21 +209,54 @@ def _resolve_account_net_liquidation(
             account_id = None
 
     if account_id is not None:
-        try:
-            nav = _select_equity_value(portfolio.equity(account_id=account_id))
-            if nav is not None:
-                return nav, account_id, "portfolio.equity(account_id)"
-        except Exception:
-            pass
-
+        account = None
+        account_lookup_succeeded = False
         try:
             account = portfolio.account(account_id=account_id)
-            if account is not None:
-                nav = _decimal(account.balance_total())
-                if nav is not None:
-                    return nav, account_id, "portfolio.account.balance_total"
+            account_lookup_succeeded = account is not None
         except Exception:
-            pass
+            account = None
+
+        if account is not None:
+            nav = _account_event_net_liquidation(account)
+            if nav is not None:
+                return nav, account_id, "portfolio.account.last_event.info.NetLiquidation"
+
+            has_balances = _account_has_typed_balances(account)
+            if has_balances is False:
+                # Explicitly empty account state: do not enter Nautilus valuation code yet.
+                return None, account_id, None
+
+            if has_balances is not False:
+                try:
+                    nav = _select_equity_value(portfolio.equity(account_id=account_id))
+                    if nav is not None:
+                        return nav, account_id, "portfolio.equity(account_id)"
+                except Exception:
+                    pass
+
+                try:
+                    nav = _decimal(account.balance_total())
+                    if nav is not None:
+                        return nav, account_id, "portfolio.account.balance_total"
+                except Exception:
+                    pass
+
+        if not account_lookup_succeeded:
+            # Compatibility path for older/mocked Portfolio implementations which expose equity
+            # but not account(). Real workers normally take the safer account-first path above.
+            try:
+                nav = _select_equity_value(portfolio.equity(account_id=account_id))
+                if nav is not None:
+                    return nav, account_id, "portfolio.equity(account_id)"
+            except Exception:
+                pass
+
+        if cache is not None:
+            # A live worker resolved the correct account but still could not obtain account-scoped
+            # NAV. Never fall back to venue-wide equity here: on a multi-account TWS connection
+            # that could silently size this route from another account's capital.
+            return None, account_id, None
 
     for venue_name in ("IB", "INTERACTIVE_BROKERS", "SMART"):
         try:

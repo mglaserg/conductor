@@ -131,3 +131,108 @@ def test_live_cache_account_mismatch_fails_closed() -> None:
     assert nav is None
     assert account_id is None
     assert source is None
+
+
+class FakeEvent:
+    def __init__(self, info) -> None:
+        self.info = info
+
+
+class EmptyIbAccountWithInfo:
+    base_currency = None
+
+    @property
+    def last_event(self):
+        return FakeEvent({"NetLiquidation": "75000.12"})
+
+    def balances(self):
+        return []
+
+    def balance_total(self):
+        raise AssertionError("must not touch balance_total for empty account state")
+
+
+class EmptyIbAccountWithoutInfo:
+    base_currency = None
+
+    @property
+    def last_event(self):
+        return FakeEvent({})
+
+    def balances(self):
+        return []
+
+    def balance_total(self):
+        raise AssertionError("must not touch balance_total for empty account state")
+
+
+class EmptyAccountPortfolio:
+    def __init__(self, account) -> None:
+        self._account = account
+        self.equity_called = False
+
+    def account(self, *, account_id=None):
+        assert account_id == FakeAccountId("IB-U_TLAQ")
+        return self._account
+
+    def equity(self, *, account_id=None, venue=None):
+        self.equity_called = True
+        raise AssertionError("must not enter Nautilus equity valuation for empty account state")
+
+
+def test_nav_reads_reported_net_liquidation_before_portfolio_valuation() -> None:
+    portfolio = EmptyAccountPortfolio(EmptyIbAccountWithInfo())
+
+    nav, account_id, source = _resolve_account_net_liquidation(
+        portfolio,
+        "U_TLAQ",
+        account_id_type=FakeAccountId,
+        venue_type=FakeVenue,
+        cache=FakeCache({"IB": FakeAccountId("IB-U_TLAQ")}),
+    )
+
+    assert nav == Decimal("75000.12")
+    assert account_id == FakeAccountId("IB-U_TLAQ")
+    assert source == "portfolio.account.last_event.info.NetLiquidation"
+    assert portfolio.equity_called is False
+
+
+def test_empty_account_state_returns_not_ready_without_entering_rust_equity() -> None:
+    portfolio = EmptyAccountPortfolio(EmptyIbAccountWithoutInfo())
+
+    nav, account_id, source = _resolve_account_net_liquidation(
+        portfolio,
+        "U_TLAQ",
+        account_id_type=FakeAccountId,
+        venue_type=FakeVenue,
+        cache=FakeCache({"IB": FakeAccountId("IB-U_TLAQ")}),
+    )
+
+    assert nav is None
+    assert account_id == FakeAccountId("IB-U_TLAQ")
+    assert source is None
+    assert portfolio.equity_called is False
+
+
+class LiveNoNavPortfolio:
+    def account(self, *, account_id=None):
+        return None
+
+    def equity(self, *, account_id=None, venue=None):
+        if account_id is not None:
+            return {}
+        raise AssertionError("live worker must never use venue-wide NAV fallback")
+
+
+def test_live_worker_never_uses_venue_wide_nav_after_account_resolution() -> None:
+    nav, account_id, source = _resolve_account_net_liquidation(
+        LiveNoNavPortfolio(),
+        "U_TLAQ",
+        account_id_type=FakeAccountId,
+        venue_type=FakeVenue,
+        cache=FakeCache({"IB": FakeAccountId("IB-U_TLAQ")}),
+    )
+
+    assert nav is None
+    assert account_id == FakeAccountId("IB-U_TLAQ")
+    assert source is None

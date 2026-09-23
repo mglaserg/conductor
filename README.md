@@ -295,6 +295,13 @@ for that route. It must show `ready: true` **and** a non-null `net_liquidation` 
 live/shadow strategy run. During IBKR startup the worker stays not-ready until account state and NAV
 have arrived.
 
+> **Current Nautilus rc4/rc5 IB limitation:** startup historical-fill reconciliation sends the
+> namespaced Nautilus account ID back to IB, which IB rejects with error 321. This is an upstream
+> adapter bug, not a Conductor route/account mismatch. Keep `live_orders_enabled = false` until a
+> verified Nautilus build fixes that request path. The Conductor worker itself avoids the separate
+> empty-account currency panic by reading venue-reported `NetLiquidation` before portfolio equity.
+
+
 Run a strategy manually:
 
 ```powershell

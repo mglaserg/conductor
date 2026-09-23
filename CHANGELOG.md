@@ -3,6 +3,26 @@
 All notable changes to Conductor are recorded here. Until a stable release process exists, entries
 follow a lightweight Keep a Changelog structure and use repository tags as the historical anchors.
 
+## 0.4.0a6 - 2026-09-23
+
+### Fixed
+
+- Prevented the IBKR worker from entering Nautilus portfolio valuation while the adapter has only
+  published an empty/half-initialized margin account state. This avoids the Rust
+  `Currency must be specified` process abort observed on a newly connected TLAQ account.
+- Broker NAV discovery now prefers the raw venue-reported `NetLiquidation` preserved in the
+  account state's `info` bag before asking Nautilus to calculate portfolio equity.
+- An explicitly empty typed-balance snapshot is now treated as `not ready` rather than as a
+  valuation input.
+
+### Known upstream limitation
+
+- NautilusTrader `2.0.0rc4` (and `rc5`/current develop as checked on 2026-09-23) builds the IB
+  historical execution filter from the namespaced Nautilus account ID (for example
+  `IB-U123...`) instead of the native IB account code (`U123...`). IB rejects that reconciliation
+  request with error 321. Conductor keeps live orders disabled while this upstream fill-history
+  reconciliation path remains affected.
+
 ## 0.4.0a5 - 2026-09-23
 
 ### Changed
