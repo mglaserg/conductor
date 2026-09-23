@@ -8,7 +8,10 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from conductor.adapters.ibkr_account_summary import IbkrAccountSummaryNavProvider
+from conductor.adapters.ibkr_account_summary import (
+    IbkrAccountSummaryNavProvider,
+    query_ibkr_stock_positions,
+)
 from conductor.adapters.nautilus import check_nautilus_v2
 from conductor.adapters.nautilus_bridge import NautilusBridgeStore, execution_report_payload
 from conductor.config import RuntimeConfig, load_runtime_config
@@ -299,6 +302,8 @@ class _BridgeStrategyMixin:
         live_orders_enabled: bool,
         order_timeout_seconds: int,
         account_summary_nav_provider: IbkrAccountSummaryNavProvider | None = None,
+        startup_expected_positions: dict[str, Decimal] | None = None,
+        startup_bootstrap_error: str | None = None,
     ) -> None:
         self._bridge_store = store
         self._bridge_route_id = route_id
@@ -307,6 +312,14 @@ class _BridgeStrategyMixin:
         self._order_timeout_seconds = order_timeout_seconds
         self._account_summary_nav_provider = account_summary_nav_provider
         self._pending_resolves: dict[str, tuple[str, Any]] = {}
+        self._pending_warms: dict[str, dict[str, Any]] = {}
+        self._instrument_requests_inflight: set[str] = set()
+        self._quote_subscriptions: set[str] = set()
+        self._startup_expected_positions = dict(startup_expected_positions or {})
+        self._startup_bootstrap_error = startup_bootstrap_error
+        self._startup_reconciled = (
+            not bool(self._startup_expected_positions) and not startup_bootstrap_error
+        )
         self._orders: dict[str, _TrackedOrder] = {}
         self._request_orders: dict[str, set[str]] = {}
         self._request_deadlines: dict[str, float] = {}
@@ -337,11 +350,14 @@ class _BridgeStrategyMixin:
     def _on_bridge_timer(self, _event: Any) -> None:
         try:
             self._refresh_pending_resolves()
+            self._refresh_pending_warms()
             self._enforce_execution_deadlines()
             for request in self._bridge_store.claim_pending(self._bridge_route_id):
                 try:
                     if request["kind"] == "resolve_instrument":
                         self._handle_resolve(request)
+                    elif request["kind"] == "warm_instruments":
+                        self._handle_warm(request)
                     elif request["kind"] == "execute":
                         self._handle_execute(request)
                     else:
@@ -358,7 +374,35 @@ class _BridgeStrategyMixin:
         for row in self._bridge_store.known_instruments(self._bridge_route_id):
             instrument_id = InstrumentId.from_str(row["nautilus_instrument_id"])
             if self.cache.instrument(instrument_id) is not None:
-                self.subscribe_quotes(instrument_id)
+                self._ensure_quote_subscription(instrument_id)
+
+    def _instrument_key(self, instrument_id: Any) -> str:
+        return str(instrument_id)
+
+    def _ensure_instrument_request(self, instrument_id: Any) -> None:
+        key = self._instrument_key(instrument_id)
+        if self.cache.instrument(instrument_id) is not None:
+            self._instrument_requests_inflight.discard(key)
+            return
+        if key in self._instrument_requests_inflight:
+            return
+        self._instrument_requests_inflight.add(key)
+        try:
+            self.request_instrument(instrument_id)
+        except Exception:
+            self._instrument_requests_inflight.discard(key)
+            raise
+
+    def _ensure_quote_subscription(self, instrument_id: Any) -> None:
+        key = self._instrument_key(instrument_id)
+        if key in self._quote_subscriptions:
+            return
+        self._quote_subscriptions.add(key)
+        try:
+            self.subscribe_quotes(instrument_id)
+        except Exception:
+            self._quote_subscriptions.discard(key)
+            raise
 
     def _handle_resolve(self, request: dict) -> None:
         InstrumentId = _import_nautilus()["InstrumentId"]
@@ -366,11 +410,25 @@ class _BridgeStrategyMixin:
         nautilus_id = canonical_to_ib_raw(canonical)
         instrument_id = InstrumentId.from_str(nautilus_id)
         if self.cache.instrument(instrument_id) is None:
-            self.request_instrument(instrument_id)
+            self._ensure_instrument_request(instrument_id)
         else:
-            self.subscribe_quotes(instrument_id)
+            self._ensure_quote_subscription(instrument_id)
         self._pending_resolves[request["request_id"]] = (canonical, instrument_id)
         self._refresh_pending_resolves()
+
+    def _handle_warm(self, request: dict) -> None:
+        InstrumentId = _import_nautilus()["InstrumentId"]
+        pending: dict[str, Any] = {}
+        for value in request["payload"].get("instruments", []):
+            canonical = str(value)
+            instrument_id = InstrumentId.from_str(canonical_to_ib_raw(canonical))
+            pending[canonical] = instrument_id
+            if self.cache.instrument(instrument_id) is None:
+                self._ensure_instrument_request(instrument_id)
+            else:
+                self._ensure_quote_subscription(instrument_id)
+        self._pending_warms[request["request_id"]] = pending
+        self._refresh_pending_warms()
 
     def _refresh_pending_resolves(self) -> None:
         PriceType = _import_nautilus()["PriceType"]
@@ -379,7 +437,8 @@ class _BridgeStrategyMixin:
             if instrument is None:
                 continue
             # Once loaded, keep a live top-of-book mark available for sizing.
-            self.subscribe_quotes(instrument_id)
+            self._instrument_requests_inflight.discard(self._instrument_key(instrument_id))
+            self._ensure_quote_subscription(instrument_id)
             price = self.cache.price(instrument_id, PriceType.MID)
             if price is None:
                 price = self.cache.price(instrument_id, PriceType.LAST)
@@ -411,6 +470,49 @@ class _BridgeStrategyMixin:
                     },
                 )
                 del self._pending_resolves[request_id]
+
+    def _refresh_pending_warms(self) -> None:
+        PriceType = _import_nautilus()["PriceType"]
+        for request_id, pending in list(self._pending_warms.items()):
+            unresolved: list[str] = []
+            for canonical, instrument_id in pending.items():
+                instrument = self.cache.instrument(instrument_id)
+                if instrument is None:
+                    unresolved.append(canonical)
+                    continue
+                self._instrument_requests_inflight.discard(self._instrument_key(instrument_id))
+                self._ensure_quote_subscription(instrument_id)
+                price = self.cache.price(instrument_id, PriceType.MID)
+                if price is None:
+                    price = self.cache.price(instrument_id, PriceType.LAST)
+                decimal_price = _decimal(price)
+                multiplier = _decimal(getattr(instrument, "multiplier", None)) or Decimal("1")
+                size_increment = (
+                    _decimal(getattr(instrument, "size_increment", None)) or Decimal("1")
+                )
+                broker_id = None
+                info = getattr(instrument, "info", None)
+                if isinstance(info, dict):
+                    broker_id = str(info.get("conId") or info.get("conid") or "") or None
+                self._bridge_store.upsert_instrument(
+                    self._bridge_route_id,
+                    canonical,
+                    nautilus_instrument_id=str(instrument_id),
+                    price=decimal_price,
+                    contract_multiplier=multiplier,
+                    lot_size=size_increment,
+                    asset_class="equity",
+                    venue=str(getattr(instrument_id, "venue", "SMART")),
+                    broker_id=broker_id,
+                )
+                if decimal_price is None:
+                    unresolved.append(canonical)
+            if not unresolved:
+                self._bridge_store.complete(
+                    request_id,
+                    {"instruments": sorted(pending), "count": len(pending)},
+                )
+                del self._pending_warms[request_id]
 
     def _handle_execute(self, request: dict) -> None:
         if not self._bridge_live:
@@ -564,6 +666,29 @@ class _BridgeStrategyMixin:
             positions.append(
                 BrokerPosition(canonical, _signed_position_qty(position), self._bridge_route_id)
             )
+        live_position_map = {position.instrument: position.quantity for position in positions}
+        if not self._startup_reconciled:
+            if self._startup_bootstrap_error:
+                ready = False
+                error = error or self._startup_bootstrap_error
+            elif live_position_map == self._startup_expected_positions:
+                self._startup_reconciled = True
+            else:
+                ready = False
+                expected = len(self._startup_expected_positions)
+                actual = len(live_position_map)
+                missing = sorted(set(self._startup_expected_positions) - set(live_position_map))
+                extra = sorted(set(live_position_map) - set(self._startup_expected_positions))
+                details = []
+                if missing:
+                    details.append("missing=" + ",".join(missing[:8]))
+                if extra:
+                    details.append("extra=" + ",".join(extra[:8]))
+                suffix = ("; " + "; ".join(details)) if details else ""
+                error = error or (
+                    f"startup broker-position reconciliation incomplete: expected {expected} held "
+                    f"instruments, Nautilus has {actual}{suffix}"
+                )
         self._bridge_store.replace_positions(self._bridge_route_id, positions)
 
         # Refresh marks for every loaded/cached Conductor instrument.
@@ -635,6 +760,8 @@ class _BridgeStrategyMixin:
                 "direct_nav_currency": direct_nav_currency,
                 "direct_nav_age_seconds": direct_nav_age_seconds,
                 "direct_nav_error": direct_nav_error,
+                "startup_reconciled": self._startup_reconciled,
+                "startup_expected_position_count": len(self._startup_expected_positions),
             },
         )
 
@@ -662,6 +789,31 @@ def _import_nautilus() -> dict[str, Any]:
         "TraderId": TraderId,
         "Venue": Venue,
     }
+
+
+def _seed_startup_positions(
+    store: NautilusBridgeStore,
+    route_id: str,
+    positions: dict[str, Decimal],
+) -> None:
+    """Seed exact broker-held stocks into the bridge before Nautilus reconciliation."""
+    for canonical in positions:
+        nautilus_id = canonical_to_ib_raw(canonical)
+        store.upsert_instrument(
+            route_id,
+            canonical,
+            nautilus_instrument_id=nautilus_id,
+            price=None,
+            asset_class="equity",
+            venue="SMART",
+        )
+    store.replace_positions(
+        route_id,
+        [
+            BrokerPosition(canonical, quantity, route_id)
+            for canonical, quantity in sorted(positions.items())
+        ],
+    )
 
 
 def _preload_ids(config: RuntimeConfig, route_id: str, store: NautilusBridgeStore) -> list[str]:
@@ -732,6 +884,20 @@ def run_nautilus_ibkr_worker(config_path: str | Path, route_id: str) -> None:
     if bridge_db is None:
         raise NautilusWorkerConfigError(f"route {route_id} has no bridge_db")
     store = NautilusBridgeStore(bridge_db)
+    startup_expected_positions: dict[str, Decimal] = {}
+    startup_bootstrap_error: str | None = None
+    try:
+        startup_expected_positions = query_ibkr_stock_positions(
+            host=route_cfg.host,
+            port=route_cfg.port,
+            client_id=route_cfg.account_summary_client_id,
+            account=route_cfg.route.account,
+            timeout_seconds=max(10.0, float(route_cfg.account_summary_timeout_seconds)),
+        )
+        _seed_startup_positions(store, route_id, startup_expected_positions)
+    except Exception as exc:  # fail closed: startup reconciliation must be exhaustive
+        startup_bootstrap_error = f"IBKR position bootstrap failed: {exc}"
+
     preload = _preload_ids(config, route_id, store)
     load_ids = {InstrumentId.from_str(value) for value in preload}
     provider_config = InteractiveBrokersInstrumentProviderConfig(
@@ -792,6 +958,8 @@ def run_nautilus_ibkr_worker(config_path: str | Path, route_id: str) -> None:
                 live_orders_enabled=route_cfg.live_orders_enabled,
                 order_timeout_seconds=route_cfg.order_timeout_seconds,
                 account_summary_nav_provider=account_summary_nav_provider,
+                startup_expected_positions=startup_expected_positions,
+                startup_bootstrap_error=startup_bootstrap_error,
             )
 
         # Explicitly bind mixin callbacks so the extension type dispatches to Python methods.
@@ -821,6 +989,11 @@ def run_nautilus_ibkr_worker(config_path: str | Path, route_id: str) -> None:
         route_id,
         ready=False,
         account_id=route_cfg.route.account,
-        details={"nautilus_version": installed, "preloaded_instruments": preload},
+        error=startup_bootstrap_error,
+        details={
+            "nautilus_version": installed,
+            "preloaded_instruments": preload,
+            "startup_expected_position_count": len(startup_expected_positions),
+        },
     )
     node.run()

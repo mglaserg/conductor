@@ -126,3 +126,41 @@ def test_terminal_execution_failure_blocks_without_committing_virtual_ownership(
     assert ledger.strategy_positions("ETSA") == {"AAPL": Decimal(50)}
     completed = [event for event in ledger.events() if event["event_type"] == "run_completed"]
     assert '"state": "blocked"' in completed[-1]["payload_json"]
+
+
+class WarmAwareExecutionAdapter(PaperExecutionAdapter):
+    def __init__(self) -> None:
+        super().__init__([])
+        self.warmed: list[dict[str, set[str]]] = []
+
+    def warm_instruments(self, route_instruments):
+        self.warmed.append({key: set(value) for key, value in route_instruments.items()})
+
+
+def test_engine_batch_warms_route_universe_before_portfolio_build() -> None:
+    nav = Decimal("100000")
+    instruments = {
+        "AAPL": InstrumentSpec("AAPL", Decimal("100")),
+        "TLT": InstrumentSpec("TLT", Decimal("90")),
+    }
+    execution = WarmAwareExecutionAdapter()
+    engine = ConductorEngine(
+        portfolio=PortfolioBuilder(instruments=instruments, portfolio_nav=nav),
+        reconciler=DesiredStateReconciler(),
+        execution=execution,
+        risk=PortfolioRiskEngine(nav),
+        order_planner=OrderPlanner(portfolio_nav=nav, instruments=instruments),
+    )
+    intents = [
+        StrategyIntent(
+            "ETSA",
+            {"AAPL": Decimal("10"), "TLT": Decimal("5")},
+            ExposureType.QUANTITY,
+            sleeve_id="equities",
+            route_id="ibkr_main",
+        )
+    ]
+
+    engine.run_cycle(intents)
+
+    assert execution.warmed == [{"ibkr_main": {"AAPL", "TLT"}}]

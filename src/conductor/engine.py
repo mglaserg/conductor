@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Iterable
 from uuid import uuid4
@@ -35,6 +36,14 @@ class ConductorEngine:
         run_id = run_id or uuid4().hex
         resolved = self.intent_book.resolve(intents)
         active_routes = {intent.route_id for intent in resolved}
+        warm = getattr(self.execution, "warm_instruments", None)
+        if callable(warm):
+            route_instruments: dict[str, set[str]] = defaultdict(set)
+            for intent in resolved:
+                if intent.status.value == "flat":
+                    continue
+                route_instruments[intent.route_id].update(intent.targets)
+            warm(route_instruments)
         desired_virtual = self.portfolio.build_virtual_targets(resolved)
         desired_virtual, risk_decision = self.risk.apply(desired_virtual)
 

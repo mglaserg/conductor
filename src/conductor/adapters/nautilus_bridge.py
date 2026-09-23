@@ -394,6 +394,31 @@ class NautilusBridgeExecutionAdapter:
             time.sleep(0.05)
         raise NautilusBridgeError(f"timed out waiting for Nautilus request {request_id}")
 
+    def warm_instruments(self, instruments: Sequence[str]) -> None:
+        self._require_worker()
+        needed: list[str] = []
+        for value in sorted({str(instrument) for instrument in instruments}):
+            row = self.store.instrument(self.route_id, value)
+            if row is None or row.get("price") is None:
+                needed.append(value)
+        if not needed:
+            return
+        request_id = self.store.enqueue(
+            self.route_id,
+            "warm_instruments",
+            {"instruments": needed},
+        )
+        self._wait(request_id)
+        unresolved: list[str] = []
+        for instrument in needed:
+            row = self.store.instrument(self.route_id, instrument)
+            if row is None or row.get("price") is None:
+                unresolved.append(instrument)
+        if unresolved:
+            raise NautilusBridgeError(
+                "worker warm-up completed without usable marks for: " + ", ".join(unresolved)
+            )
+
     def instrument_spec(self, instrument: str) -> InstrumentSpec:
         self._require_worker()
         row = self.store.instrument(self.route_id, instrument)

@@ -250,21 +250,24 @@ uv run conductor status --paper --config examples/offline_paper_smoke.toml
 
 ## Bootstrap scope is explicit
 
-Nautilus reconciliation requires the instruments referenced by broker reports to be loaded. The
-Windows route therefore has a bootstrap field:
+Nautilus reconciliation requires the instruments referenced by broker reports to be loaded *before*
+startup reconciliation runs. The IBKR worker now performs an exact-account read-only position
+preflight through TWS, converts every non-zero stock holding into a RAW Nautilus instrument ID, and
+adds those IDs to the provider's startup `load_ids`. The worker stays `ready=false` until Nautilus
+reconstructs the same broker position set.
+
+`preload_instruments` remains available for reconciliation-only instruments that should be loaded
+even when they are not currently held:
 
 ```toml
 preload_instruments = ["AAPL", "MSFT"]
 ```
 
-Before cutover, every physical IBKR holding in the Conductor-controlled account must be either:
-
-1. present in a strategy's seeded virtual positions; or
-2. listed as a reconciliation-only `preload_instrument`.
-
-A non-zero preloaded position with no virtual owner makes `conductor doctor` fail. **No unmodeled
-account position is allowed at go-live.** Once Conductor has execution authority, manual trading in
-that account should be treated as an operational exception requiring explicit reconciliation.
+A non-zero broker/preloaded position with no virtual owner makes `conductor doctor` fail. **No
+unmodeled account position is allowed at go-live.** If the equities-only worker discovers a held
+non-stock contract during its preflight, it fails closed rather than silently skipping that position.
+Once Conductor has execution authority, manual trading in that account should be treated as an
+operational exception requiring explicit reconciliation.
 
 ## Install
 
@@ -314,8 +317,10 @@ It never uses venue-wide equity as a live fallback across accounts.
 
 `worker-status` also verifies that the worker-reported IBKR account matches the account configured
 for that route. It must show `ready: true` **and** a non-null `net_liquidation` before `doctor` or a
-live/shadow strategy run. During IBKR startup the worker stays not-ready until account state and NAV
-have arrived.
+live/shadow strategy run. During IBKR startup the worker stays not-ready until account state, NAV, and the broker-position
+preflight/reconciliation gate have completed. Before each portfolio cycle Conductor also warms the
+route's complete target universe in one worker request; the worker deduplicates instrument requests
+and quote subscriptions while waiting for usable marks.
 
 > **Current Nautilus rc4/rc5 IB limitation:** startup historical-fill reconciliation sends the
 > namespaced Nautilus account ID back to IB, which IB rejects with error 321. This is an upstream

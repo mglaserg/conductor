@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.0a8 - 2026-09-23
+
+### Fixed
+
+- Added an exact-account IBKR position preflight before Nautilus node construction. Existing stock
+  holdings are now discovered through the read-only TWS API and injected into the instrument
+  provider's startup `load_ids`, preventing broker positions from being skipped simply because the
+  instrument cache was cold.
+- Worker readiness is now gated on startup broker-position reconciliation. A worker cannot publish
+  `ready=true` while the broker preflight says positions exist but Nautilus has not reconstructed
+  those positions.
+- Added route-level batch instrument warm-up before portfolio construction. Strategy target universes
+  are resolved together instead of serially blocking once per symbol.
+- Deduplicated in-flight instrument requests and quote subscriptions inside the persistent worker,
+  eliminating repeated `Subscribe(Quotes(...))` calls from the 250 ms bridge poll loop.
+- Raised the default bridge request timeout from 60 seconds to 180 seconds as a cold-cache safety
+  margin. The timeout is no longer the primary instrument-discovery mechanism because route
+  universes are warmed in one batch first.
+
+### Safety
+
+- The broker-position preflight filters by the exact configured native IB account code and fails
+  closed if the equities-only worker encounters a non-stock holding it cannot model safely.
+- The known upstream Nautilus `IB-U...` historical-execution reconciliation warning remains
+  unchanged; `live_orders_enabled = false` is still required for shadow validation.
+
 ## 0.4.0a7 - 2026-09-23
 
 ### Added

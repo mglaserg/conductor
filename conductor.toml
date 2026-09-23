@@ -167,7 +167,7 @@ bridge_db = "data/nautilus_ibkr_main_bridge.sqlite"
 instrument_cache_path = "data/ibkr_instruments.json"
 
 worker_stale_after_seconds = 15
-request_timeout_seconds = 60
+request_timeout_seconds = 180
 order_timeout_seconds = 30
 
 # START FALSE.
@@ -201,7 +201,7 @@ bridge_db = "data/nautilus_ibkr_tlaq_bridge.sqlite"
 instrument_cache_path = "data/ibkr_instruments.json"
 
 worker_stale_after_seconds = 15
-request_timeout_seconds = 60
+request_timeout_seconds = 180
 order_timeout_seconds = 30
 
 # START FALSE.

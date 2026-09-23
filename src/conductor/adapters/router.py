@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Mapping, Sequence
+from typing import Iterable, Mapping, Sequence
 
 from conductor.adapters.base import ExecutionAdapter
 from conductor.domain.models import BrokerPosition, ExecutionReport, TradeDelta
@@ -12,6 +12,16 @@ class RoutedExecutionAdapter:
 
     def __init__(self, routes: Mapping[str, ExecutionAdapter]) -> None:
         self.routes = dict(routes)
+
+    def warm_instruments(self, route_instruments: Mapping[str, Iterable[str]]) -> None:
+        for route_id, instruments in route_instruments.items():
+            try:
+                adapter = self.routes[route_id]
+            except KeyError as exc:
+                raise KeyError(f"no execution adapter configured for route {route_id}") from exc
+            warm = getattr(adapter, "warm_instruments", None)
+            if callable(warm):
+                warm(list(instruments))
 
     def positions(self) -> list[BrokerPosition]:
         out: list[BrokerPosition] = []

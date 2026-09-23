@@ -154,6 +154,119 @@ def query_ibkr_net_liquidation(
             thread.join(timeout=1.0)
 
 
+def query_ibkr_stock_positions(
+    *,
+    host: str,
+    port: int,
+    client_id: int,
+    account: str,
+    timeout_seconds: float = 10.0,
+    app_factory: Callable[[str], Any] | None = None,
+) -> dict[str, Decimal]:
+    """Read the exact account's non-zero IB stock positions before Nautilus startup.
+
+    Nautilus performs execution reconciliation before Python strategy callbacks run. If held
+    instruments are absent from its instrument provider cache, those broker positions are skipped
+    during reconciliation. This lightweight preflight discovers the held stock symbols first so the
+    worker can include them in ``load_ids`` before building the live node.
+    """
+    if not account or account == "paper":
+        raise IbkrAccountSummaryError("a native IB account code is required")
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+
+    if app_factory is None:
+        from ibapi.client import EClient
+        from ibapi.wrapper import EWrapper
+
+        class PositionApp(EWrapper, EClient):
+            def __init__(self) -> None:
+                EWrapper.__init__(self)
+                EClient.__init__(self, self)
+                self.ready_event = threading.Event()
+                self.positions_done_event = threading.Event()
+                self.positions: dict[str, Decimal] = {}
+                self.unsupported: list[str] = []
+                self.fatal_errors: list[str] = []
+
+            def nextValidId(self, orderId: int) -> None:  # noqa: N802 - IB callback API
+                self.ready_event.set()
+
+            def position(self, callback_account, contract, position, avgCost) -> None:  # noqa: N802
+                if str(callback_account) != account:
+                    return
+                qty = _parse_decimal(position)
+                if qty == 0:
+                    return
+                sec_type = str(getattr(contract, "secType", "") or "").upper()
+                symbol = str(getattr(contract, "symbol", "") or "").strip()
+                if sec_type != "STK" or not symbol:
+                    self.unsupported.append(
+                        f"{symbol or '<unknown>'}:{sec_type or '<unknown>'}"
+                    )
+                    return
+                self.positions[symbol] = self.positions.get(symbol, Decimal("0")) + qty
+
+            def positionEnd(self) -> None:  # noqa: N802 - IB callback API
+                self.positions_done_event.set()
+
+            def error(self, reqId: int, errorCode: int, errorString: str, *args: Any) -> None:
+                if int(errorCode) in {321, 326, 502, 504, 1100, 1300}:
+                    self.fatal_errors.append(f"IB error {errorCode}: {errorString}")
+                    if int(errorCode) in {321, 326, 502, 504, 1300}:
+                        self.ready_event.set()
+                        self.positions_done_event.set()
+
+        app = PositionApp()
+    else:
+        app = app_factory(account)
+
+    thread: threading.Thread | None = None
+    try:
+        app.connect(host, int(port), clientId=int(client_id))
+        thread = threading.Thread(
+            target=app.run,
+            name=f"conductor-ib-positions-{account}",
+            daemon=True,
+        )
+        thread.start()
+        if not app.ready_event.wait(timeout_seconds):
+            raise IbkrAccountSummaryError(
+                f"timed out waiting for TWS API readiness on {host}:{port} client_id={client_id}"
+            )
+        if app.fatal_errors:
+            raise IbkrAccountSummaryError(app.fatal_errors[-1])
+        app.reqPositions()
+        if not app.positions_done_event.wait(timeout_seconds):
+            raise IbkrAccountSummaryError(
+                f"timed out waiting for broker positions for {account}"
+            )
+        if app.fatal_errors:
+            raise IbkrAccountSummaryError(app.fatal_errors[-1])
+        unsupported = list(getattr(app, "unsupported", []))
+        if unsupported:
+            raise IbkrAccountSummaryError(
+                "IB account contains unsupported non-stock positions for the equities-only "
+                f"worker: {', '.join(sorted(unsupported))}"
+            )
+        return {
+            str(symbol): Decimal(str(qty))
+            for symbol, qty in dict(getattr(app, "positions", {})).items()
+            if Decimal(str(qty)) != 0
+        }
+    finally:
+        try:
+            app.cancelPositions()
+        except Exception:
+            pass
+        try:
+            app.disconnect()
+        except Exception:
+            pass
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
+
+
 class IbkrAccountSummaryNavProvider:
     """Non-blocking, expiring cache for direct IB account-summary NAV.
 

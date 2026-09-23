@@ -251,3 +251,118 @@ def test_bridge_rejects_worker_connected_to_wrong_account(tmp_path):
     )
     with pytest.raises(NautilusBridgeError, match="expected 'DU999'"):
         adapter.positions()
+
+
+def test_batch_warm_resolves_many_instruments_with_one_bridge_request(tmp_path):
+    path = tmp_path / "bridge.sqlite"
+    store = NautilusBridgeStore(path)
+    _ready(store)
+    adapter = NautilusBridgeExecutionAdapter(
+        bridge_db=path,
+        route_id="ibkr",
+        live_orders_enabled=False,
+        request_timeout_seconds=2,
+    )
+
+    def worker() -> None:
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            requests = store.claim_pending("ibkr")
+            if requests:
+                assert len(requests) == 1
+                req = requests[0]
+                assert req["kind"] == "warm_instruments"
+                assert req["payload"]["instruments"] == ["AAPL", "TLT"]
+                for symbol, price in (("AAPL", "225.50"), ("TLT", "90.25")):
+                    store.upsert_instrument(
+                        "ibkr",
+                        symbol,
+                        nautilus_instrument_id=f"{symbol}=STK.SMART",
+                        price=Decimal(price),
+                        asset_class="equity",
+                        venue="SMART",
+                    )
+                store.complete(req["request_id"], {"count": 2})
+                return
+            time.sleep(0.01)
+        raise AssertionError("no warm request")
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    adapter.warm_instruments(["TLT", "AAPL", "AAPL"])
+    thread.join(timeout=2)
+
+    with store._connect() as conn:
+        rows = conn.execute("SELECT kind FROM requests").fetchall()
+    assert [row["kind"] for row in rows] == ["warm_instruments"]
+
+
+def test_default_ibkr_request_timeout_allows_cold_cache_over_sixty_seconds(tmp_path):
+    from conductor.config import load_runtime_config
+
+    config_path = tmp_path / "conductor.toml"
+    config_path.write_text(
+        """
+[node]
+id = "windows"
+state_db = "state.sqlite"
+run_root = "runs"
+portfolio_nav = 100000
+
+[routes.ibkr]
+adapter = "nautilus_ibkr"
+account = "DU123"
+bridge_db = "bridge.sqlite"
+
+[strategies.TEST]
+route_id = "ibkr"
+result_mode = "target_weights"
+cwd = "."
+command = ["python", "strategy.py"]
+
+[portfolio]
+allocator = "static"
+
+[portfolio.static.weights]
+TEST = 1.0
+""".strip(),
+        encoding="utf-8",
+    )
+    config = load_runtime_config(config_path)
+    assert config.routes["ibkr"].request_timeout_seconds == 180
+
+
+def test_broker_position_preflight_puts_all_held_instruments_in_startup_load_ids(tmp_path):
+    from conductor.adapters.nautilus_ibkr_worker import _preload_ids, _seed_startup_positions
+    from conductor.config import load_runtime_config
+
+    config_path = tmp_path / "conductor.toml"
+    config_path.write_text(
+        """
+[node]
+id = "windows"
+state_db = "state.sqlite"
+run_root = "runs"
+portfolio_nav = 100000
+
+[routes.ibkr]
+adapter = "nautilus_ibkr"
+account = "DU123"
+bridge_db = "bridge.sqlite"
+
+[risk]
+max_gross_leverage = 2
+max_instrument_nav = 0.5
+""".strip(),
+        encoding="utf-8",
+    )
+    config = load_runtime_config(config_path)
+    store = NautilusBridgeStore(config.routes["ibkr"].bridge_db)
+    positions = {f"SYM{i:02d}": Decimal(i + 1) for i in range(34)}
+
+    _seed_startup_positions(store, "ibkr", positions)
+    load_ids = _preload_ids(config, "ibkr", store)
+
+    assert len(load_ids) == 34
+    assert set(load_ids) == {f"SYM{i:02d}=STK.SMART" for i in range(34)}
+    assert {position.instrument for position in store.positions("ibkr")} == set(positions)

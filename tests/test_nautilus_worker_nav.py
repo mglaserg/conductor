@@ -236,3 +236,37 @@ def test_live_worker_never_uses_venue_wide_nav_after_account_resolution() -> Non
     assert nav is None
     assert account_id == FakeAccountId("IB-U_TLAQ")
     assert source is None
+
+
+def test_worker_quote_subscription_is_deduplicated() -> None:
+    from conductor.adapters.nautilus_ibkr_worker import _BridgeStrategyMixin
+
+    worker = object.__new__(_BridgeStrategyMixin)
+    worker._quote_subscriptions = set()
+    calls: list[str] = []
+    worker.subscribe_quotes = lambda instrument_id: calls.append(str(instrument_id))
+
+    worker._ensure_quote_subscription("AAPL=STK.SMART")
+    worker._ensure_quote_subscription("AAPL=STK.SMART")
+    worker._ensure_quote_subscription("AAPL=STK.SMART")
+
+    assert calls == ["AAPL=STK.SMART"]
+
+
+def test_worker_instrument_request_is_deduplicated_while_pending() -> None:
+    from conductor.adapters.nautilus_ibkr_worker import _BridgeStrategyMixin
+
+    class Cache:
+        def instrument(self, _instrument_id):
+            return None
+
+    worker = object.__new__(_BridgeStrategyMixin)
+    worker.cache = Cache()
+    worker._instrument_requests_inflight = set()
+    calls: list[str] = []
+    worker.request_instrument = lambda instrument_id: calls.append(str(instrument_id))
+
+    worker._ensure_instrument_request("TLT=STK.SMART")
+    worker._ensure_instrument_request("TLT=STK.SMART")
+
+    assert calls == ["TLT=STK.SMART"]

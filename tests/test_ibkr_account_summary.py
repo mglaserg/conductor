@@ -139,3 +139,90 @@ def test_nav_provider_refreshes_off_thread_and_exposes_fresh_value() -> None:
     assert age is not None and age < 0.2
     assert calls[0]["account"] == "U_TLAQ"
     assert calls[0]["client_id"] == 11312
+
+
+class FakePositionContract:
+    def __init__(self, symbol: str, sec_type: str = "STK") -> None:
+        self.symbol = symbol
+        self.secType = sec_type
+
+
+class FakePositionApp:
+    def __init__(self, account: str, rows: list[tuple[str, str, str, str]]) -> None:
+        self.account = account
+        self.rows = rows
+        self.ready_event = threading.Event()
+        self.positions_done_event = threading.Event()
+        self.positions: dict[str, Decimal] = {}
+        self.unsupported: list[str] = []
+        self.fatal_errors: list[str] = []
+        self.connected = None
+        self.cancelled = False
+        self.disconnected = False
+
+    def connect(self, host: str, port: int, clientId: int) -> None:  # noqa: N803
+        self.connected = (host, port, clientId)
+        self.ready_event.set()
+
+    def run(self) -> None:
+        return
+
+    def reqPositions(self) -> None:  # noqa: N802
+        for account, symbol, sec_type, quantity in self.rows:
+            if account != self.account:
+                continue
+            qty = Decimal(quantity)
+            if qty == 0:
+                continue
+            if sec_type != "STK":
+                self.unsupported.append(f"{symbol}:{sec_type}")
+                continue
+            self.positions[symbol] = self.positions.get(symbol, Decimal("0")) + qty
+        self.positions_done_event.set()
+
+    def cancelPositions(self) -> None:  # noqa: N802
+        self.cancelled = True
+
+    def disconnect(self) -> None:
+        self.disconnected = True
+
+
+def test_direct_position_bootstrap_reads_only_exact_account_stock_positions() -> None:
+    from conductor.adapters.ibkr_account_summary import query_ibkr_stock_positions
+
+    app = FakePositionApp(
+        "U_MAIN",
+        [
+            ("U_MAIN", "AAPL", "STK", "100"),
+            ("U_MAIN", "TLT", "STK", "25"),
+            ("U_OTHER", "MSFT", "STK", "999"),
+            ("U_MAIN", "AAPL", "STK", "-20"),
+        ],
+    )
+
+    positions = query_ibkr_stock_positions(
+        host="127.0.0.1",
+        port=7496,
+        client_id=11302,
+        account="U_MAIN",
+        app_factory=lambda _account: app,
+    )
+
+    assert positions == {"AAPL": Decimal("80"), "TLT": Decimal("25")}
+    assert app.connected == ("127.0.0.1", 7496, 11302)
+    assert app.cancelled is True
+    assert app.disconnected is True
+
+
+def test_direct_position_bootstrap_fails_closed_on_non_stock_holding() -> None:
+    from conductor.adapters.ibkr_account_summary import query_ibkr_stock_positions
+
+    app = FakePositionApp("U_MAIN", [("U_MAIN", "ES", "FUT", "1")])
+    with pytest.raises(IbkrAccountSummaryError, match="unsupported non-stock positions"):
+        query_ibkr_stock_positions(
+            host="127.0.0.1",
+            port=7496,
+            client_id=11302,
+            account="U_MAIN",
+            app_factory=lambda _account: app,
+        )

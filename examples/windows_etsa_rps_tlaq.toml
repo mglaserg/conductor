@@ -79,7 +79,7 @@ preload_instruments = []
 bridge_db = "data/ibkr_main_nautilus_bridge.sqlite"
 instrument_cache_path = "data/ibkr_instruments.json"
 worker_stale_after_seconds = 15
-request_timeout_seconds = 60
+request_timeout_seconds = 180
 order_timeout_seconds = 30
 live_orders_enabled = false
 
@@ -99,7 +99,7 @@ preload_instruments = []
 bridge_db = "data/ibkr_tlaq_nautilus_bridge.sqlite"
 instrument_cache_path = "data/ibkr_instruments.json"
 worker_stale_after_seconds = 15
-request_timeout_seconds = 60
+request_timeout_seconds = 180
 order_timeout_seconds = 30
 live_orders_enabled = false
 

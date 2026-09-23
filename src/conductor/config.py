@@ -27,7 +27,7 @@ class RouteConfig:
     bridge_db: Path | None = None
     instrument_cache_path: Path | None = None
     worker_stale_after_seconds: int = 15
-    request_timeout_seconds: int = 60
+    request_timeout_seconds: int = 180
     order_timeout_seconds: int = 30
     market_data_type: str = "REALTIME"
     preload_instruments: tuple[str, ...] = ()
@@ -437,7 +437,7 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
                 else _resolve_path(base, f"data/{route_id}_ib_instruments.json")
             ),
             worker_stale_after_seconds=int(item.get("worker_stale_after_seconds", 15)),
-            request_timeout_seconds=int(item.get("request_timeout_seconds", 60)),
+            request_timeout_seconds=int(item.get("request_timeout_seconds", 180)),
             order_timeout_seconds=int(item.get("order_timeout_seconds", 30)),
             market_data_type=str(item.get("market_data_type", "REALTIME")),
             preload_instruments=tuple(str(value) for value in item.get("preload_instruments", [])),
