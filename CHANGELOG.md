@@ -48,6 +48,11 @@ follow a lightweight Keep a Changelog structure and use repository tags as the h
 
 ### Fixed
 
+- IBKR worker NAV publication now resolves Nautilus's namespaced live `AccountId` from the cache
+  (for example `IB-U123...`) and verifies its broker-native account number before reading NAV.
+  This avoids constructing invalid raw `AccountId("U123...")` values on Nautilus 2.x.
+- Live workers no longer fall back to venue-wide equity when the configured account cannot be
+  resolved, preventing one IBKR account from being sized from another account's NAV.
 - IBKR worker NAV publication now queries Nautilus by the configured account ID first, so
   multi-account routes do not depend on ambiguous venue-scoped equity/cache lookups.
 - Workers no longer report `ready=true` while `NetLiquidation` is unavailable; startup remains

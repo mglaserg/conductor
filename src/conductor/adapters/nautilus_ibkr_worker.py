@@ -81,46 +81,107 @@ def _select_equity_value(equity: Any) -> Decimal | None:
     return _decimal(equity)
 
 
+def _raw_account_number(account_id: Any) -> str:
+    """Return the broker-native account number from a Nautilus AccountId-like object."""
+    getter = getattr(account_id, "get_id", None)
+    if callable(getter):
+        try:
+            return str(getter())
+        except Exception:
+            pass
+    value = str(account_id)
+    return value.rsplit("-", 1)[-1]
+
+
+def _resolve_cached_account_id(
+    cache: Any,
+    configured_account: str,
+    *,
+    venue_type: Any,
+) -> Any | None:
+    """Find Nautilus' namespaced AccountId for one configured IB account.
+
+    Interactive Brokers config accepts the native account number (for example ``U123``),
+    while Nautilus stores accounts under a namespaced ``AccountId`` such as ``IB-U123``.
+    Never construct that namespace ourselves: ask the live cache for the authoritative ID.
+    """
+    for venue_name in ("IB", "INTERACTIVE_BROKERS", "SMART"):
+        try:
+            account_id = cache.account_id(venue_type.from_str(venue_name))
+        except Exception:
+            continue
+        if account_id is None:
+            continue
+        if _raw_account_number(account_id) == configured_account:
+            return account_id
+    return None
+
+
 def _resolve_account_net_liquidation(
     portfolio: Any,
     configured_account: str,
     *,
     account_id_type: Any,
     venue_type: Any,
-) -> Decimal | None:
+    cache: Any | None = None,
+) -> tuple[Decimal | None, Any | None, str | None]:
     """Resolve NAV for one configured broker account.
 
-    Nautilus 2.x supports account-scoped Portfolio queries. Prefer those so two IBKR
-    accounts on the same venue can never be aggregated accidentally. Older venue-only
-    calls remain as a compatibility fallback for earlier 2.0 release candidates.
+    Prefer the authoritative account ID already registered in Nautilus' cache. IB accepts
+    native account numbers in its adapter config, but Nautilus namespaces the resulting
+    ``AccountId`` with the execution-client issuer (for example ``IB-U123``). Constructing
+    ``AccountId("U123")`` is therefore both invalid and unsafe for multi-account routing.
+
+    The venue-only branch remains as a final compatibility fallback for old 2.0 release
+    candidates, but current workers should resolve an account-scoped ID first.
     """
-    account_id = account_id_type(configured_account)
+    account_id = None
+    if cache is not None:
+        account_id = _resolve_cached_account_id(
+            cache,
+            configured_account,
+            venue_type=venue_type,
+        )
 
-    try:
-        nav = _select_equity_value(portfolio.equity(account_id=account_id))
-        if nav is not None:
-            return nav
-    except Exception:
-        pass
+    if account_id is None and cache is not None:
+        # Current live workers must never fall back to venue-wide equity when the configured
+        # account cannot be resolved. That could silently size one account from another account's
+        # NAV on a multi-account broker connection.
+        return None, None, None
 
-    try:
-        account = portfolio.account(account_id=account_id)
-        if account is not None:
-            nav = _decimal(account.balance_total())
+    if account_id is None:
+        # Unit-test / legacy helper path only. Real workers use the cached namespaced ID above.
+        try:
+            account_id = account_id_type(configured_account)
+        except Exception:
+            account_id = None
+
+    if account_id is not None:
+        try:
+            nav = _select_equity_value(portfolio.equity(account_id=account_id))
             if nav is not None:
-                return nav
-    except Exception:
-        pass
+                return nav, account_id, "portfolio.equity(account_id)"
+        except Exception:
+            pass
 
-    for venue_name in ("INTERACTIVE_BROKERS", "SMART"):
+        try:
+            account = portfolio.account(account_id=account_id)
+            if account is not None:
+                nav = _decimal(account.balance_total())
+                if nav is not None:
+                    return nav, account_id, "portfolio.account.balance_total"
+        except Exception:
+            pass
+
+    for venue_name in ("IB", "INTERACTIVE_BROKERS", "SMART"):
         try:
             venue = venue_type.from_str(venue_name)
             nav = _select_equity_value(portfolio.equity(venue=venue))
             if nav is not None:
-                return nav
+                return nav, account_id, f"portfolio.equity(venue={venue_name})"
         except Exception:
             continue
-    return None
+    return None, account_id, None
 
 
 @dataclass(slots=True)
@@ -439,17 +500,24 @@ class _BridgeStrategyMixin:
             )
 
         AccountId = types["AccountId"]
-        nav = _resolve_account_net_liquidation(
+        nav, nautilus_account_id, nav_source = _resolve_account_net_liquidation(
             self.portfolio,
             self._bridge_account,
             account_id_type=AccountId,
             venue_type=Venue,
+            cache=self.cache,
         )
         if nav is None and ready:
             ready = False
-            error = error or (
-                f"account state for {self._bridge_account} is loaded without NetLiquidation"
-            )
+            if nautilus_account_id is None:
+                error = error or (
+                    f"Nautilus cache has no account ID matching configured IB account "
+                    f"{self._bridge_account}"
+                )
+            else:
+                error = error or (
+                    f"account state for {self._bridge_account} is loaded without NetLiquidation"
+                )
         self._bridge_store.heartbeat(
             self._bridge_route_id,
             ready=ready,
@@ -458,7 +526,10 @@ class _BridgeStrategyMixin:
             error=error,
             details={
                 "live_orders_enabled": self._bridge_live,
-                "nav_source": "nautilus_portfolio_account",
+                "nautilus_account_id": (
+                    None if nautilus_account_id is None else str(nautilus_account_id)
+                ),
+                "nav_source": nav_source,
             },
         )
 

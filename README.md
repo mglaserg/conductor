@@ -284,6 +284,11 @@ uv run conductor worker-status ibkr_main --config conductor.toml
 uv run conductor worker-status ibkr_tlaq --config conductor.toml
 ```
 
+Nautilus namespaces IB account IDs internally (for example `IB-U123...`) even though the IB adapter
+configuration uses the native account number (`U123...`). The worker resolves the authoritative
+namespaced ID from Nautilus's live cache and verifies its native portion before publishing NAV.
+It never uses venue-wide equity as a live fallback across accounts.
+
 `worker-status` also verifies that the worker-reported IBKR account matches the account configured
 for that route. It must show `ready: true` **and** a non-null `net_liquidation` before `doctor` or a
 live/shadow strategy run. During IBKR startup the worker stays not-ready until account state and NAV
