@@ -7,6 +7,16 @@ follow a lightweight Keep a Changelog structure and use repository tags as the h
 
 ### Added
 
+- Route-backed named capital pools in a single `conductor.toml`, allowing independent broker
+  accounts to use their own NAV, allocator, strategy weights, risk budget and trade-size buffer.
+- Broker `NetLiquidation`-derived capital allocation per live route, with separate synthetic
+  `[paper.portfolio_navs]` overrides for multi-account offline paper runs.
+- Route-scoped strategy runtime startup and reconciliation so an unrelated account/worker cannot
+  block or be mutated by another account's strategy cycle.
+- Per-route gross, net and single-instrument risk scaling, plus route-aware dust filtering.
+- Configured-vs-worker-reported IBKR account validation and distinct multi-worker Windows launch
+  support.
+- ADR 0006 documenting route-backed capital pools and explicit account-migration boundaries.
 - True offline `run --paper` and `status --paper` runtime for Windows and Lubuntu, with a separate
   SQLite ledger, durable synthetic broker positions/fills, deterministic default/override prices,
   static capital allocation, funded initial strategy cash, and case-insensitive CLI strategy IDs.
@@ -38,6 +48,10 @@ follow a lightweight Keep a Changelog structure and use repository tags as the h
 
 ### Changed
 
+- Static/inverse-vol/ERC selection and fallback are now configured per capital pool rather than as
+  one node-global allocator. Legacy one-pool configuration remains supported where unambiguous.
+- Named-pool strategy `allocated_capital` is refreshed from the route NAV and resolved allocator;
+  seed capital is no longer the authority for those live pools.
 - Clarified that Conductor owns economic state and portfolio decisions while NautilusTrader owns
   broker/exchange execution plumbing.
 - Made the Windows ETSA/RPSchteroids/TLAQ migration the active promotion milestone.

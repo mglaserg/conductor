@@ -20,15 +20,13 @@ run_root = "data/runs"
 # ------------------------------------------------------------
 # PORTFOLIO CAPITAL ALLOCATION
 #
-# This Windows portfolio is independent of the Lubuntu crypto
-# portfolio.
-#
-# ONE allocator is active at a time:
-#   static
-#   inverse_vol
-#   erc
+# Each route-backed block below is an independently funded capital pool.
+# ETSA/RPS share ibkr_main; TLAQ uses ibkr_tlaq. Each pool selects its
+# allocator independently.
 # ------------------------------------------------------------
 
+# Each named portfolio is one independently funded capital pool backed by the
+# route with the same ID. Broker NetLiquidation is the default NAV source.
 [portfolio.ibkr_main]
 allocator = "static"
 
@@ -40,6 +38,9 @@ allocator = "static"
 [portfolio.ibkr_main.static.weights]
 ETSA = 0.85
 RPSchteroids = 0.15
+
+[portfolio.ibkr_tlaq]
+allocator = "static"
 
 [portfolio.ibkr_tlaq.static.weights]
 TLAQ = 1.0
@@ -54,6 +55,12 @@ TLAQ = 1.0
 
 [paper]
 default_price = 100
+
+# Synthetic NAVs used only by `--paper`. Live/shadow mode still reads
+# NetLiquidation independently from each configured broker route.
+[paper.portfolio_navs]
+ibkr_main = 100000
+ibkr_tlaq = 100000
 
 # Optional canonical-instrument overrides:
 # [paper_prices]
@@ -88,7 +95,7 @@ rebalance_threshold = 0.025
 # If ERC cannot run because of insufficient history / optimizer
 # failure, Conductor can fall back safely.
 
-[portfolio.fallback]
+[portfolio.ibkr_main.fallback]
 order = ["erc", "inverse_vol", "static"]
 
 
@@ -98,7 +105,7 @@ order = ["erc", "inverse_vol", "static"]
 
 [risk]
 
-# Across all Windows strategies combined.
+# Defaults applied independently to each route-backed capital pool.
 max_gross_leverage = 2.0
 max_net_exposure = 1.0
 

@@ -16,8 +16,8 @@ strategy adapter / target protocol
               |
               v
 Conductor control plane
-  virtual accounts -> allocation -> portfolio -> risk
-  -> rebalance bands -> internal crossing -> broker delta
+  route-backed capital pools -> virtual accounts -> allocation -> risk
+  -> rebalance bands -> same-route crossing -> broker delta
               |
               v
 execution adapter / durable local bridge
@@ -51,9 +51,10 @@ becomes absolute desired state before entering the portfolio core.
 
 The main decision path is composed from small domain services:
 
-- `PortfolioBuilder` sizes strategy intent and aggregates route-aware targets;
-- `VirtualRebalanceBuffer` applies sleeve-level rebalance-band policy before cross-strategy netting;
-- `PortfolioRiskEngine` applies deterministic portfolio limits;
+- `PortfolioBuilder` sizes strategy intent from each strategy's allocated capital and aggregates route-aware targets;
+- named `portfolio.<route_id>` capital pools resolve independent broker/fixed NAV and allocation policy;
+- `VirtualRebalanceBuffer` applies sleeve-level rebalance-band policy before same-route netting;
+- `PortfolioRiskEngine` applies deterministic limits independently per route/account;
 - `DesiredStateReconciler` computes desired minus actual broker quantity;
 - `OrderPlanner` suppresses uneconomic residual trades;
 - `VirtualAccountingEngine` preserves ownership, internal crosses, cash, and fill allocation;
@@ -90,14 +91,15 @@ and Lubuntu and is distinct from live-account shadow mode.
 5. validate native output
 6. normalize output to absolute StrategyIntent
 7. persist desired strategy state/revision
-8. build aggregate route-aware desired portfolio
-9. apply sleeve policy and portfolio risk
-10. calculate desired broker delta
-11. internalize opposing strategy changes where possible
-12. submit only residual external deltas, or return shadow reports
-13. refresh actual broker state and reconcile
-14. commit virtual ownership/cash only from reconciled facts
-15. persist run outcome and audit records
+8. select the strategy's route-backed capital pool and same-route companion books
+9. build aggregate desired state for that route/account
+10. apply sleeve policy and route-local portfolio risk
+11. calculate desired broker delta
+12. internalize opposing same-route strategy changes where possible
+13. submit only residual external deltas, or return shadow reports
+14. refresh actual broker state for that route and reconcile
+15. commit only that route's virtual ownership/cash from reconciled facts
+16. persist run outcome and audit records
 ```
 
 Failures before reconciliation must leave the prior committed virtual ownership intact. A later run
@@ -137,29 +139,40 @@ Nautilus, and broker. Correctness therefore depends on:
 - committing virtual ownership only after reconciliation;
 - preserving evidence across restart and timeout.
 
-## Virtual ownership and netting
+## Route-backed capital pools, virtual ownership, and netting
 
-IBKR exposes the physical account total. Conductor retains the economic decomposition:
+Each independently funded broker account is represented by one named capital pool keyed by route.
+Its NAV comes from that route's broker NetLiquidation by default, and only strategies assigned to
+that route share the pool's allocation and risk budget.
+
+Within a shared account, Conductor retains the economic decomposition:
 
 ```text
+route ibkr_main
 ETSA            AAPL  +40
 RPSchteroids    AAPL  +25
+                       ---
+IBKR physical   AAPL  +65
+
+route ibkr_tlaq
 TLAQ            AAPL  -10
                        ---
-IBKR physical   AAPL  +55
+IBKR physical   AAPL  -10
 ```
 
-If strategies make opposing changes, `VirtualAccountingEngine` records an internal transfer. Only
-the net residual is eligible for broker execution. Internal crosses change ownership without
-pretending that an external fill occurred.
+If ETSA and RPS make opposing changes on `ibkr_main`, `VirtualAccountingEngine` records an internal
+transfer and only the net residual is eligible for that broker account. TLAQ cannot cross with them
+while it is assigned to `ibkr_tlaq`, even if the canonical instrument is identical.
 
 Bootstrap seeds are explicit operator assertions. Conductor never reverse-engineers the ownership
-split from the aggregate broker position.
+split from aggregate broker positions, and changing an already-persisted strategy's route is refused
+until an explicit account migration/bootstrap is performed.
 
 ## Routing and instrument identity
 
-Route identity is part of position identity. Equal display symbols on different routes are not
-fungible and do not net.
+Route identity is part of position identity **and capital identity**. Equal display symbols on
+different routes are not fungible, do not net, and do not share NAV or risk capacity. A strategy run
+reconciles only its own route/account plus companion books assigned to that route.
 
 Canonical instrument identifiers remain broker-agnostic in strategy and portfolio code. A route
 resolver maps them to exact venue instruments and persists the result. V0.4 automatic mapping is
@@ -168,17 +181,18 @@ parsers before promotion.
 
 ## Deployment topology
 
-The Windows node owns its local strategy runs, ledger, bridge, Nautilus worker, and IBKR connection.
-A future Lubuntu crypto node owns an equivalent local source of truth and venue connection.
+The Windows node owns its local strategy runs and ledger plus one bridge/worker per configured IBKR
+route/account. A future Lubuntu crypto node owns an equivalent local source of truth and venue
+connection.
 
 ```text
 Windows node                         Lubuntu node
 ------------                         ------------
 local strategies                     local strategies
 local Conductor ledger               local Conductor ledger
-local execution bridge               local execution bridge
-local persistent worker              local persistent worker
-IBKR                                 crypto venue
+route-specific execution bridges     local execution bridge
+route-specific persistent workers    local persistent worker
+IBKR accounts                        crypto venue
          \                           /
           \-- outbound telemetry ---/
                     |
@@ -217,3 +231,4 @@ When adding a broker or venue:
 - `docs/adr/0003-nautilus-execution-kernel.md`
 - `docs/adr/0004-sqlite-wal-local-bridge.md`
 - `docs/adr/0005-independent-node-sources-of-truth.md`
+- `docs/adr/0006-route-backed-capital-pools.md`

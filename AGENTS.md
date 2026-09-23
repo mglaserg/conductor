@@ -28,7 +28,8 @@ audit, and desired broker state. NautilusTrader owns broker/exchange connectivit
 loading, orders, fills, and broker reconciliation.
 
 The current production objective is the Windows equities migration for ETSA, RPSchteroids, and
-TLAQ on one shared Interactive Brokers account.
+TLAQ. ETSA/RPSchteroids share one IBKR capital pool/account while TLAQ may use a separate IBKR
+account; both are configured on the same Windows node.
 
 ## Non-negotiable architecture boundaries
 
@@ -76,8 +77,8 @@ TLAQ on one shared Interactive Brokers account.
 - Make retries, restarts, and repeated identical runs safe by construction.
 - Persist important decisions and transitions; nothing important should exist only in memory or on
   the dashboard.
-- Keep routing explicit. Positions on different routes do not net merely because their display
-  symbols match.
+- Keep routing explicit. Positions on different routes do not net or share capital/risk capacity
+  merely because their display symbols match.
 - Add infrastructure only when the local, low-frequency workload proves it is necessary.
 - Favor deterministic behavior and explainable risk decisions over hidden heuristics.
 
@@ -160,7 +161,8 @@ migration guide:
 ```powershell
 uv sync --extra dev --extra nautilus --prerelease allow
 uv run conductor-nautilus-smoke
-uv run conductor worker-status windows_ibkr_equities --config conductor.toml
+uv run conductor worker-status ibkr_main --config conductor.toml
+uv run conductor worker-status ibkr_tlaq --config conductor.toml
 uv run conductor doctor --config conductor.toml
 ```
 

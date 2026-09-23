@@ -237,3 +237,17 @@ def test_bridge_rejects_stale_worker_heartbeat(tmp_path):
     )
     with pytest.raises(NautilusBridgeError, match="stale"):
         adapter.positions()
+
+
+def test_bridge_rejects_worker_connected_to_wrong_account(tmp_path):
+    path = tmp_path / "bridge.sqlite"
+    store = NautilusBridgeStore(path)
+    _ready(store)
+    adapter = NautilusBridgeExecutionAdapter(
+        bridge_db=path,
+        route_id="ibkr",
+        live_orders_enabled=False,
+        expected_account_id="DU999",
+    )
+    with pytest.raises(NautilusBridgeError, match="expected 'DU999'"):
+        adapter.positions()

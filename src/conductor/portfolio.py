@@ -73,7 +73,9 @@ class PortfolioBuilder:
         instruments: Mapping[str, InstrumentSpec] | None = None,
         portfolio_nav: Decimal = Decimal("100000"),
         instrument_provider: Callable[[str], InstrumentSpec] | None = None,
+        route_instrument_provider: Callable[[str, str], InstrumentSpec] | None = None,
         strategy_capital_provider: Callable[[str, str, str], Decimal] | None = None,
+        route_navs: Mapping[str, Decimal] | None = None,
     ) -> None:
         if portfolio_nav <= ZERO:
             raise ValueError("portfolio_nav must be positive")
@@ -81,7 +83,9 @@ class PortfolioBuilder:
         self.instruments = dict(instruments or {})
         self.portfolio_nav = portfolio_nav
         self.instrument_provider = instrument_provider
+        self.route_instrument_provider = route_instrument_provider
         self.strategy_capital_provider = strategy_capital_provider
+        self.route_navs = dict(route_navs or {})
 
     def capital_budget(
         self, sleeve_id: str, strategy_id: str, book_id: str = "main"
@@ -118,15 +122,19 @@ class PortfolioBuilder:
         rounded = lots * lot_size
         return rounded if quantity >= ZERO else -rounded
 
-    def _spec(self, instrument: str) -> InstrumentSpec:
+    def _spec(self, instrument: str, route_id: str = "default") -> InstrumentSpec:
         spec = self.instruments.get(instrument)
         if spec is not None:
+            return spec
+        if self.route_instrument_provider is not None:
+            spec = self.route_instrument_provider(route_id, instrument)
+            self.instruments[instrument] = spec
             return spec
         if self.instrument_provider is not None:
             spec = self.instrument_provider(instrument)
             self.instruments[instrument] = spec
             return spec
-        raise MissingInstrumentError(f"no instrument spec for {instrument}")
+        raise MissingInstrumentError(f"no instrument spec for {route_id}/{instrument}")
 
     def build_virtual_targets(self, intents: Iterable[StrategyIntent]) -> list[VirtualTarget]:
         virtual: list[VirtualTarget] = []
@@ -135,7 +143,7 @@ class PortfolioBuilder:
             targets = {} if intent.status is IntentStatus.FLAT else intent.targets
 
             for instrument, source_target in targets.items():
-                spec = self._spec(instrument)
+                spec = self._spec(instrument, intent.route_id)
                 if intent.exposure_type is ExposureType.NAV_WEIGHT:
                     notional = budget.exposure_budget * source_target
                     raw_quantity = notional / spec.unit_notional
@@ -188,18 +196,31 @@ class PortfolioBuilder:
             if quantities[(route_id, instrument)] != ZERO
         ]
 
-    def metrics(self, virtual_targets: Iterable[VirtualTarget]) -> PortfolioMetrics:
+    def metrics(
+        self,
+        virtual_targets: Iterable[VirtualTarget],
+        *,
+        route_ids: Iterable[str] | None = None,
+    ) -> PortfolioMetrics:
         aggregate = self.aggregate(virtual_targets)
         gross = sum((abs(t.notional) for t in aggregate), ZERO)
         net = sum((t.notional for t in aggregate), ZERO)
         long_notional = sum((max(t.notional, ZERO) for t in aggregate), ZERO)
         short_notional = sum((abs(min(t.notional, ZERO)) for t in aggregate), ZERO)
+        selected_routes = set(route_ids or ())
+        if self.route_navs and selected_routes:
+            try:
+                nav = sum((self.route_navs[route] for route in selected_routes), ZERO)
+            except KeyError as exc:
+                raise KeyError(f"no portfolio NAV configured for route {exc.args[0]}") from exc
+        else:
+            nav = self.portfolio_nav
         return PortfolioMetrics(
-            nav=self.portfolio_nav,
+            nav=nav,
             gross_notional=gross,
             net_notional=net,
-            gross_leverage=gross / self.portfolio_nav,
-            net_leverage=net / self.portfolio_nav,
+            gross_leverage=gross / nav,
+            net_leverage=net / nav,
             long_notional=long_notional,
             short_notional=short_notional,
         )

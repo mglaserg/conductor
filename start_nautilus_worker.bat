@@ -2,13 +2,17 @@
 setlocal
 
 REM ============================================================
-REM Conductor - Start Nautilus IBKR Worker
-REM Place this file in the root of the Conductor repository.
+REM Conductor - Start one Nautilus IBKR Worker
+REM Usage: start_nautilus_worker.bat [route_id]
+REM Default route: ibkr_main
 REM ============================================================
 
 cd /d "%~dp0"
 
-title Conductor - Nautilus IBKR Worker
+set "ROUTE=%~1"
+if "%ROUTE%"=="" set "ROUTE=ibkr_main"
+
+title Conductor - Nautilus IBKR Worker - %ROUTE%
 
 if not exist "logs" mkdir "logs"
 
@@ -34,18 +38,18 @@ if not exist "conductor.toml" (
 echo.
 echo ============================================================
 echo Starting Conductor Nautilus IBKR worker
-echo Route:  windows_ibkr
+echo Route:  %ROUTE%
 echo Config: %CD%\conductor.toml
 echo ============================================================
 echo.
 
-uv run conductor nautilus-worker windows_ibkr --config conductor.toml
+uv run conductor nautilus-worker %ROUTE% --config conductor.toml
 
 set EXITCODE=%ERRORLEVEL%
 
 echo.
 echo ============================================================
-echo Nautilus worker exited with code %EXITCODE%
+echo Nautilus worker %ROUTE% exited with code %EXITCODE%
 echo ============================================================
 echo.
 

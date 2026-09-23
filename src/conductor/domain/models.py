@@ -191,6 +191,10 @@ class RiskDecision:
     gross_before: Decimal = ZERO
     gross_after: Decimal = ZERO
     largest_instrument_before: Decimal = ZERO
+    net_before: Decimal = ZERO
+    net_after: Decimal = ZERO
+    route_scales: Mapping[str, Decimal] = field(default_factory=dict)
+    route_reasons: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

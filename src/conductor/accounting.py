@@ -132,9 +132,13 @@ class VirtualAccountingEngine:
         *,
         run_id: str | None = None,
         execution_reports: Iterable[ExecutionReport] | None = None,
+        route_ids: Iterable[str] | None = None,
     ) -> None:
         desired_rows = list(desired)
+        scoped_routes = set(route_ids or ())
         current = self._current_positions()
+        if scoped_routes:
+            current = {key: value for key, value in current.items() if key[2] in scoped_routes}
         wanted = {
             (t.strategy_id, t.book_id, t.route_id, t.instrument): t.target for t in desired_rows
         }
@@ -240,4 +244,4 @@ class VirtualAccountingEngine:
                 },
             )
 
-        self.ledger.replace_virtual_positions(desired_rows)
+        self.ledger.replace_virtual_positions(desired_rows, route_ids=scoped_routes or None)

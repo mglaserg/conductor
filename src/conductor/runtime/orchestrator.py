@@ -64,15 +64,22 @@ class StrategyRunOrchestrator:
         payload["positions"] = {k: str(v) for k, v in account.positions.items()}
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    def _portfolio_intents(self) -> list[StrategyIntent]:
-        """Latest desired books plus hold-current intents for not-yet-run strategies.
+    def _portfolio_intents(self, route_id: str | None = None) -> list[StrategyIntent]:
+        """Latest desired books plus hold-current intents for one capital pool.
 
-        This is critical during migration: running RPS first must never imply that
-        TLAQ/ETSA disappear simply because they have not produced a Conductor book yet.
+        Strategies sharing a route/account must remain present when one of them runs, but an
+        independent account must not become an execution dependency or accidental flatten target.
+        ``route_id=None`` retains the legacy all-route view for direct callers.
         """
-        intents = self.ledger.runtime_intents()
+        intents = [
+            intent
+            for intent in self.ledger.runtime_intents()
+            if route_id is None or intent.route_id == route_id
+        ]
         present = {(intent.strategy_id, intent.book_id) for intent in intents}
         for profile in self.profiles.values():
+            if route_id is not None and profile.route_id != route_id:
+                continue
             key = (profile.strategy_id, profile.book_id)
             if key in present:
                 continue
@@ -131,7 +138,9 @@ class StrategyRunOrchestrator:
             metadata={"producer": "conductor-retirement", "run_id": run_id},
         )
         self.ledger.replace_runtime_intent(intent, run_id=run_id)
-        result = self.engine.run_cycle(self._portfolio_intents(), run_id=run_id)
+        result = self.engine.run_cycle(
+            self._portfolio_intents(profile.route_id), run_id=run_id
+        )
         remaining = self.ledger.strategy_positions(
             profile.strategy_id, book_id=profile.book_id
         )
@@ -256,7 +265,7 @@ class StrategyRunOrchestrator:
                 run_id=run_id,
             )
             self.ledger.replace_runtime_intent(intent, run_id=run_id)
-            all_intents = self._portfolio_intents()
+            all_intents = self._portfolio_intents(profile.route_id)
             portfolio_result = self.engine.run_cycle(all_intents, run_id=run_id)
         except Exception as exc:  # noqa: BLE001 - preserve desired-state failure audit
             error = f"Conductor normalization/portfolio cycle failed: {exc}"

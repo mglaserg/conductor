@@ -97,6 +97,9 @@ def main() -> None:
         heartbeat = datetime.fromisoformat(state["heartbeat_at"])
         age = max(0.0, (datetime.now(timezone.utc) - heartbeat).total_seconds())
         details = json.loads(state.get("details_json") or "{}")
+        configured_account = route_cfg.route.account
+        actual_account = state.get("account_id")
+        account_matches = actual_account == configured_account
         payload = {
             "route_id": args.route_id,
             "ready": bool(state["ready"]),
@@ -105,12 +108,14 @@ def main() -> None:
             "stale_after_seconds": route_cfg.worker_stale_after_seconds,
             "stale": age > route_cfg.worker_stale_after_seconds,
             "net_liquidation": state.get("net_liquidation"),
-            "account_id": state.get("account_id"),
+            "account_id": actual_account,
+            "configured_account_id": configured_account,
+            "account_matches": account_matches,
             "error": state.get("error"),
             "details": details,
         }
         print(json.dumps(payload, indent=2, sort_keys=True))
-        if payload["stale"] or not payload["ready"]:
+        if payload["stale"] or not payload["ready"] or not account_matches:
             raise SystemExit(3)
         return
     if args.command == "nautilus-worker":
@@ -122,7 +127,9 @@ def main() -> None:
         try:
             import streamlit  # noqa: F401
         except ImportError as exc:
-            raise SystemExit("dashboard extra is not installed; install conductor-trading[dashboard]") from exc
+            raise SystemExit(
+                "dashboard extra is not installed; install conductor-trading[dashboard]"
+            ) from exc
         module_path = Path(__file__).with_name("dashboard") / "app.py"
         raise SystemExit(
             subprocess.call(
@@ -142,11 +149,27 @@ def main() -> None:
     if args.command in {"run", "status", "doctor", "activate", "disable", "retire"}:
         if args.command == "retire" and args.confirm != args.strategy_id:
             raise SystemExit(
-                "REFUSED: retirement can flatten positions; pass --confirm with the exact strategy ID"
+                "REFUSED: retirement can flatten positions; pass --confirm with the exact "
+                "strategy ID"
             )
+        route_scope = None
+        if args.command in {"run", "activate", "disable", "retire"}:
+            from conductor.config import load_runtime_config
+
+            config = load_runtime_config(args.config)
+            matches = [
+                configured
+                for configured in config.strategies
+                if configured.casefold() == args.strategy_id.casefold()
+            ]
+            if len(matches) != 1:
+                raise SystemExit(f"unknown configured strategy: {args.strategy_id}")
+            route_scope = {config.strategies[matches[0]].route_id}
+
         app = ConductorRuntimeApp.from_path(
             args.config,
             paper=bool(getattr(args, "paper", False)),
+            route_scope=route_scope,
         )
         try:
             if args.command == "run":

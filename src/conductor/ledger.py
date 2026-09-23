@@ -440,11 +440,20 @@ class ConductorLedger:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def replace_virtual_targets(self, targets: Iterable[VirtualTarget]) -> None:
+    def replace_virtual_targets(
+        self, targets: Iterable[VirtualTarget], *, route_ids: Iterable[str] | None = None
+    ) -> None:
         rows = list(targets)
+        scoped_routes = set(route_ids or ())
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
-            conn.execute("DELETE FROM virtual_targets")
+            if scoped_routes:
+                conn.executemany(
+                    "DELETE FROM virtual_targets WHERE route_id=?",
+                    [(route_id,) for route_id in sorted(scoped_routes)],
+                )
+            else:
+                conn.execute("DELETE FROM virtual_targets")
             conn.executemany(
                 """
                 INSERT INTO virtual_targets
@@ -469,7 +478,12 @@ class ConductorLedger:
                     for t in rows
                 ],
             )
-            self._append_event_on_conn(conn, "virtual_targets_replaced", {"count": len(rows)}, now)
+            self._append_event_on_conn(
+                conn,
+                "virtual_targets_replaced",
+                {"count": len(rows), "route_ids": sorted(scoped_routes)},
+                now,
+            )
 
     def virtual_targets(self) -> list[VirtualTarget]:
         with self._connect() as conn:
@@ -497,12 +511,26 @@ class ConductorLedger:
             for row in rows
         ]
 
-    def replace_virtual_positions(self, targets: Iterable[VirtualTarget]) -> None:
-        """Commit economic ownership only after aggregate broker state reconciles."""
+    def replace_virtual_positions(
+        self, targets: Iterable[VirtualTarget], *, route_ids: Iterable[str] | None = None
+    ) -> None:
+        """Commit economic ownership only after aggregate broker state reconciles.
+
+        ``route_ids`` scopes an independent capital-pool cycle so reconciling one broker account
+        never deletes ownership belonging to another account. Omitting it preserves the legacy
+        replace-all behavior used by direct callers/tests.
+        """
         rows = list(targets)
+        scoped_routes = set(route_ids or ())
         now = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
-            conn.execute("DELETE FROM virtual_positions")
+            if scoped_routes:
+                conn.executemany(
+                    "DELETE FROM virtual_positions WHERE route_id=?",
+                    [(route_id,) for route_id in sorted(scoped_routes)],
+                )
+            else:
+                conn.execute("DELETE FROM virtual_positions")
             conn.executemany(
                 """
                 INSERT INTO virtual_positions
@@ -524,7 +552,10 @@ class ConductorLedger:
                 ],
             )
             self._append_event_on_conn(
-                conn, "virtual_positions_committed", {"count": len(rows)}, now
+                conn,
+                "virtual_positions_committed",
+                {"count": len(rows), "route_ids": sorted(scoped_routes)},
+                now,
             )
 
     def virtual_positions(self) -> list[dict[str, str]]:
@@ -914,6 +945,56 @@ class ConductorLedger:
                     "route_id": route_id,
                     "allocated_capital": str(allocated_capital),
                     "cash": str(cash),
+                },
+                now,
+            )
+
+    def update_strategy_allocation(
+        self,
+        strategy_id: str,
+        *,
+        allocated_capital: Decimal,
+        route_id: str,
+        book_id: str = "main",
+    ) -> None:
+        """Refresh a strategy budget without rewriting virtual cash or positions.
+
+        Route changes are deliberately refused here. Moving an existing strategy book between
+        broker accounts is an economic migration and must first reconcile/seed ownership on the
+        destination route; a config edit alone is not sufficient.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            current = conn.execute(
+                "SELECT route_id, allocated_capital FROM strategy_accounts "
+                "WHERE strategy_id=? AND book_id=?",
+                (strategy_id, book_id),
+            ).fetchone()
+            if current is None:
+                raise KeyError(f"strategy account not seeded: {strategy_id}/{book_id}")
+            if current["route_id"] != route_id:
+                raise RuntimeError(
+                    f"strategy {strategy_id}/{book_id} is persisted on route "
+                    f"{current['route_id']} but config assigns {route_id}; perform an explicit "
+                    "account migration/bootstrap before changing route_id"
+                )
+            if Decimal(current["allocated_capital"]) == allocated_capital:
+                return
+            conn.execute(
+                """
+                UPDATE strategy_accounts SET allocated_capital=?, updated_at=?
+                WHERE strategy_id=? AND book_id=?
+                """,
+                (str(allocated_capital), now, strategy_id, book_id),
+            )
+            self._append_event_on_conn(
+                conn,
+                "strategy.allocation_updated",
+                {
+                    "strategy_id": strategy_id,
+                    "book_id": book_id,
+                    "route_id": route_id,
+                    "allocated_capital": str(allocated_capital),
                 },
                 now,
             )

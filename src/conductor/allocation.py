@@ -197,50 +197,51 @@ class FallbackAllocator:
         *,
         configured: Mapping[str, Decimal],
         returns: Mapping[str, Sequence[Decimal]] | None = None,
+        fallback_order: Sequence[str] | None = None,
     ) -> AllocationDecision:
-        method = method.lower()
-        if method == "static":
-            return self.static.allocate(configured)
-        if method == "inverse_vol":
+        requested = method.lower()
+        allowed = {"static", "inverse_vol", "erc"}
+        if requested not in allowed:
+            raise AllocationError(f"unknown allocator: {method}")
+
+        configured_order = [name.lower() for name in (fallback_order or ())]
+        unknown = [name for name in configured_order if name not in allowed]
+        if unknown:
+            raise AllocationError("unknown allocator fallback(s): " + ", ".join(unknown))
+        chain = [requested] + [name for name in configured_order if name != requested]
+        if "static" not in chain:
+            chain.append("static")
+
+        failures: list[tuple[str, str]] = []
+        for candidate in chain:
             try:
-                if returns is None:
-                    raise InsufficientAllocationHistory("no return history")
-                return self.inverse_vol.allocate(returns)
-            except AllocationError as exc:
-                fallback = self.static.allocate(configured)
-                return AllocationDecision(
-                    fallback.method,
-                    fallback.weights,
-                    {**fallback.diagnostics, "fallback_from": "inverse_vol", "reason": str(exc)},
-                )
-        if method == "erc":
-            try:
-                if returns is None:
-                    raise InsufficientAllocationHistory("no return history")
-                return self.erc.allocate(returns)
-            except AllocationError as erc_error:
-                try:
+                if candidate == "static":
+                    decision = self.static.allocate(configured)
+                elif candidate == "inverse_vol":
                     if returns is None:
                         raise InsufficientAllocationHistory("no return history")
-                    fallback = self.inverse_vol.allocate(returns)
-                    return AllocationDecision(
-                        fallback.method,
-                        fallback.weights,
-                        {
-                            **fallback.diagnostics,
-                            "fallback_from": "erc",
-                            "reason": str(erc_error),
-                        },
-                    )
-                except AllocationError as iv_error:
-                    fallback = self.static.allocate(configured)
-                    return AllocationDecision(
-                        fallback.method,
-                        fallback.weights,
-                        {
-                            **fallback.diagnostics,
-                            "fallback_from": "erc->inverse_vol",
-                            "reason": f"ERC: {erc_error}; inverse vol: {iv_error}",
-                        },
-                    )
-        raise AllocationError(f"unknown allocator: {method}")
+                    decision = self.inverse_vol.allocate(returns)
+                else:
+                    if returns is None:
+                        raise InsufficientAllocationHistory("no return history")
+                    decision = self.erc.allocate(returns)
+            except AllocationError as exc:
+                failures.append((candidate, str(exc)))
+                continue
+
+            if candidate == requested and not failures:
+                return decision
+            return AllocationDecision(
+                decision.method,
+                decision.weights,
+                {
+                    **decision.diagnostics,
+                    "fallback_from": "->".join(name for name, _ in failures),
+                    "reason": "; ".join(f"{name}: {reason}" for name, reason in failures),
+                },
+            )
+
+        raise AllocationError(
+            "all allocation methods failed: "
+            + "; ".join(f"{name}: {reason}" for name, reason in failures)
+        )

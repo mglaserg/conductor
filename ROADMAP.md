@@ -42,6 +42,7 @@ Windows equity strategies without rewriting their strategy logic.
 ### Implemented in the V0.4 alpha code
 
 - config-driven node, route, strategy, seed, capital, and risk setup;
+- route-backed named capital pools in one TOML, with independent broker NAV, allocator, risk, and trade-buffer budgets per account;
 - one-shot strategy subprocess orchestration with persisted inputs, outputs, stdout, and stderr;
 - database-atomic one-active-run acquisition for each strategy/book;
 - native target-weight, target-quantity, and position-delta adapters;
@@ -51,6 +52,8 @@ Windows equity strategies without rewriting their strategy logic.
 - static, inverse-volatility, ERC, and deterministic fallback allocators;
 - sleeve rebalance bands plus portfolio gross and single-instrument caps;
 - route-aware execution and a persistent SQLite/WAL Nautilus bridge;
+- one worker/bridge state boundary per IBKR account, with configured-vs-reported account-ID fail-closed checks;
+- route-scoped strategy runtime startup so an unrelated account worker outage does not block another account;
 - persistent Nautilus IBKR worker boundary with heartbeat, broker state, instrument resolution,
   request recovery, orders, fills, and commissions;
 - explicit shadow mode with live submission disabled by default;
@@ -67,13 +70,14 @@ Windows equity strategies without rewriting their strategy logic.
 1. Install and import the selected NautilusTrader 2.x build on the actual Windows trading machine.
 2. Wire the production ETSA, RPSchteroids, and TLAQ adapters without changing their proven signal
    calculations or schedules.
-3. Review and approve each strategy's initial virtual positions, cash, and allocated capital.
-4. Account for every physical IBKR position and make `conductor doctor` clean.
-5. Prove worker heartbeat, account/NAV publication, instrument preload, price availability, and
-   restart recovery against IBKR paper.
+3. Review and approve each strategy's initial virtual positions and cash; verify allocator-derived capital against each route's broker NAV.
+4. Account for every physical IBKR position on the correct route/account and make `conductor doctor` clean across all configured routes.
+5. Prove both workers' heartbeat, account-ID match, per-account NAV publication, instrument preload,
+   price availability, and restart recovery against IBKR paper.
 6. Prove a small paper order end to end, including fill quantity, average price, commission,
    reconciliation, and an empty second cycle.
-7. Close any gaps exposed by the required failure drills. Concurrent acquisition, subprocess
+7. Close any gaps exposed by the required failure drills, including proving that an unrelated route
+   outage does not block another account. Concurrent acquisition, subprocess
    failure/timeout, malformed output, terminal rejection, and partial-fill-then-cancel have unit
    coverage. Stale/disconnected worker, delta replay, cross-strategy overlap, broker mismatch, and
    all operational repetitions remain part of the promotion gate.
@@ -84,7 +88,8 @@ Windows equity strategies without rewriting their strategy logic.
 ### Gate
 
 All three strategies complete repeated live-account shadow runs with attributable virtual books,
-clean bootstrap reconciliation, deterministic proposed trades, and no unexplained mismatch. Paper
+per-route broker NAV/capital budgets, clean multi-account bootstrap reconciliation, deterministic
+proposed trades, and no unexplained mismatch. Paper
 failure drills pass. Execution authority can then move once, with rollback preserving all ledger
 and bridge evidence.
 

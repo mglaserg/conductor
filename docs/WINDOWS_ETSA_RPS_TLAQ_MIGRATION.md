@@ -1,75 +1,193 @@
 # Windows migration: ETSA + RPSchteroids + TLAQ
 
-This is the operational runbook for moving the three existing Windows equity strategies from
-Dagster to Conductor while preserving their proven strategy logic.
+This is the operator runbook for moving the three existing Windows equity strategies from Dagster
+to Conductor without rewriting their strategy logic.
 
-The goal is not to redesign ETSA/RPS/TLAQ. The goal is to replace orchestration, shared-account
-bookkeeping, portfolio control and broker execution with Conductor + NautilusTrader.
+The canonical topology is **one Conductor node, one `conductor.toml`, multiple independently funded
+IBKR routes**:
+
+```text
+ETSA ---------+                         +--> IBKR account: ibkr_main
+              +--> capital pool -------+       (ETSA + RPS share capital/risk/netting)
+RPS ----------+    portfolio.ibkr_main |
+                                        |
+TLAQ ------------> capital pool ------------> IBKR account: ibkr_tlaq
+                   portfolio.ibkr_tlaq        (independent capital/risk/netting)
+```
+
+A route is both an execution-account identity and a capital-pool boundary. Capital, risk capacity,
+trade buffers, reconciliation and internal netting do not move across routes.
 
 ## 1. Runtime topology
 
-Run three kinds of process on the Windows trading machine:
+Run these processes on the Windows trading machine:
 
 1. **TWS or IB Gateway** — the Interactive Brokers endpoint.
-2. **one persistent Nautilus worker** — owns the IBKR API connection, instrument cache, market data,
-   orders/fills and reconciliation.
-3. **short-lived Conductor strategy runs** — launched by Task Scheduler at each strategy's existing
-   production time.
+2. **one persistent Nautilus worker per configured IBKR route/account**.
+3. **short-lived Conductor strategy runs** — launched at each strategy's existing production time.
+
+For the current two-account layout:
 
 ```text
-Task Scheduler -> conductor run ETSA -----------+
-Task Scheduler -> conductor run RPSchteroids ---+--> local Conductor SQLite
-Task Scheduler -> conductor run TLAQ -----------+          |
-                                                           v
-                                                 local Nautilus bridge SQLite
-                                                           |
-                                                           v
-                                                 persistent Nautilus worker
-                                                           |
-                                                           v
-                                                      TWS / Gateway
+Task Scheduler -> conductor run ETSA -----------+--> route ibkr_main worker --> IBKR account A
+Task Scheduler -> conductor run RPSchteroids ---+
+
+Task Scheduler -> conductor run TLAQ --------------> route ibkr_tlaq worker --> IBKR account B
+
+                         all durable virtual ownership/audit state
+                                      |
+                                      v
+                              data/conductor.sqlite
 ```
 
-The strategy processes never connect to IBKR.
+The strategy subprocesses never connect to IBKR directly.
 
-## 2. Prepare the strategy adapters
+`conductor run <strategy>` starts only the route-backed runtime needed by that strategy. ETSA and
+RPS therefore depend on `ibkr_main`; TLAQ depends on `ibkr_tlaq`. An unrelated account worker being
+down must not block a strategy on another route. By contrast, `conductor status` and
+`conductor doctor` intentionally inspect the complete configured node and therefore require all
+relevant routes to be healthy.
+
+## 2. One-file capital-pool configuration
+
+Each independently funded account gets one named portfolio whose ID matches its route ID:
+
+```toml
+[portfolio.ibkr_main]
+allocator = "static"
+
+[portfolio.ibkr_main.static.weights]
+ETSA = 0.85
+RPSchteroids = 0.15
+
+[portfolio.ibkr_tlaq]
+allocator = "static"
+
+[portfolio.ibkr_tlaq.static.weights]
+TLAQ = 1.0
+```
+
+In live/shadow mode, the default NAV source is the route's broker `NetLiquidation`. There is no
+global Windows NAV split across independent accounts. If `ibkr_main` reports $200,000 and
+`ibkr_tlaq` reports $75,000, the static budgets are $170,000 ETSA, $30,000 RPS and $75,000 TLAQ.
+
+Each pool can select its own allocator and risk overrides. Global `[risk]` values are defaults that
+are applied independently to each capital pool.
+
+For fully offline `--paper` with more than one pool, provide synthetic NAVs without changing the
+live broker-NAV behavior:
+
+```toml
+[paper.portfolio_navs]
+ibkr_main = 100000
+ibkr_tlaq = 100000
+```
+
+## 3. Execution routes and workers
+
+Use one route per physical IBKR account. Routes may share the same TWS/Gateway host and port, but
+they must have distinct IB API client IDs and distinct bridge databases.
+
+Example shape:
+
+```toml
+[routes.ibkr_main]
+adapter = "nautilus_ibkr"
+account = "ACCOUNT_A"
+host = "127.0.0.1"
+port = 7496
+data_client_id = 1301
+exec_client_id = 1302
+bridge_db = "data/nautilus_ibkr_main_bridge.sqlite"
+live_orders_enabled = false
+
+[routes.ibkr_tlaq]
+adapter = "nautilus_ibkr"
+account = "ACCOUNT_B"
+host = "127.0.0.1"
+port = 7496
+data_client_id = 1311
+exec_client_id = 1312
+bridge_db = "data/nautilus_ibkr_tlaq_bridge.sqlite"
+live_orders_enabled = false
+```
+
+Conductor fails closed when the worker-reported account ID does not match the account configured
+for that route.
+
+Start both workers with:
+
+```powershell
+.\start_nautilus_workers.bat
+```
+
+or individually:
+
+```powershell
+uv run conductor nautilus-worker ibkr_main --config conductor.toml
+uv run conductor nautilus-worker ibkr_tlaq --config conductor.toml
+```
+
+Check them independently:
+
+```powershell
+uv run conductor worker-status ibkr_main --config conductor.toml
+uv run conductor worker-status ibkr_tlaq --config conductor.toml
+```
+
+## 4. Prepare the strategy adapters
 
 Copy the relevant templates from `examples/migration/` into the existing strategy repositories.
 Keep `_emit.py` beside each adapter.
 
 ### ETSA
 
-The included ETSA adapter reuses the current RobotWealth fetch and
-`latest_tri_stat_arb_weights(...)` calculation and emits target weights. Adjust imports only if the
-production ETSA package path differs.
+The ETSA adapter reuses the existing RobotWealth fetch and `latest_tri_stat_arb_weights(...)`
+calculation and emits complete target weights.
 
 ### RPSchteroids
 
-Set:
-
-```toml
-[strategies.RPSchteroids.environment]
-RPS_TARGET_CALLABLE = "your.module:target_positions"
-```
-
-The callable returns `{ticker: absolute_target_shares}`.
+Set the configured callable so the adapter returns the complete desired target representation used
+by the current production strategy.
 
 ### TLAQ
 
-Set:
+TLAQ remains a position-delta producer. Its adapter receives TLAQ's own virtual account snapshot and
+returns signed share deltas. Conductor converts those deltas once into absolute desired ownership
+before portfolio aggregation, preserving idempotency.
 
-```toml
-[strategies.TLAQ.environment]
-TLAQ_DELTA_CALLABLE = "your.module:trade_deltas"
+## 5. Build and approve the initial virtual subledger
+
+This is the most important migration step.
+
+Within a physical broker account, every controlled broker position must have attributable virtual
+ownership. ETSA and RPS can overlap because they share `ibkr_main`; TLAQ is reconciled separately on
+`ibkr_tlaq`.
+
+Example for the shared account:
+
+```text
+ibkr_main AAPL broker actual = 150
+
+ETSA virtual                 = 100
+RPS virtual                  =  50
+                               ---
+expected broker              = 150
 ```
 
-The callable receives the Conductor strategy-account snapshot and returns
-`{ticker: signed_share_delta}`. Negative virtual cash is preserved in that snapshot.
+TLAQ ownership is **not** part of that sum when TLAQ is on `ibkr_tlaq`.
 
-The adapter converts the deltas to a run output; Conductor applies them once to the starting TLAQ
-virtual positions and stores only the resulting absolute desired state.
+For named portfolios, `allocated_capital` is derived from the route's NAV and allocator on each
+runtime startup. Do not manually seed capital just to mirror the weights. `seed.positions` and
+`seed.cash` remain bootstrap assertions and must be approved against reality. TLAQ cash may be
+negative.
 
-## 3. Install Conductor and Nautilus
+After the initial bootstrap, SQLite owns the virtual state. Changing a strategy's `route_id` is not
+a hot account transfer: Conductor refuses a persisted strategy account whose stored route differs
+from configuration. Moving a strategy to another account requires an explicit broker transfer or
+re-establishment plus a reviewed virtual-book migration/bootstrap.
+
+## 6. Install and verify Conductor
 
 From the Conductor repo:
 
@@ -78,133 +196,101 @@ uv python install 3.12
 uv venv --python 3.12
 uv pip install -e ".[dev,nautilus]"
 uv run pytest -q
-```
-
-Before relying on the Windows trading machine, verify that the installed Nautilus wheel imports:
-
-```powershell
 uv run conductor-nautilus-smoke
 ```
 
-Nautilus officially tests Windows Server rather than ordinary Windows desktop editions. The
-actual Windows trading machine therefore needs a paper smoke before Conductor depends on it.
+The actual Windows trading machine still requires its own Nautilus/IBKR paper smoke.
 
-## 4. Build the initial virtual subledger
+## 7. Paper connectivity smoke
 
-This is the most important migration step.
+Start TWS paper trading or IB Gateway paper and configure each route with the correct paper account
+and API port. Keep live submission disabled.
 
-For every overlapping or non-overlapping current position, determine economic ownership before
-Conductor receives execution authority.
-
-Example:
-
-```text
-AAPL broker actual = 150
-
-TLAQ virtual        = 100
-RPS virtual         =  50
-ETSA virtual        =   0
-                     ----
-expected broker     = 150
-```
-
-Populate each strategy's `seed.positions`, `seed.cash`, and `seed.allocated_capital` in the TOML.
-TLAQ cash may be negative.
-
-Conductor does not guess initial ownership from the aggregate broker account.
-
-### Current physical holdings outside those seeds
-
-Add every other current equity in the IBKR account to:
-
-```toml
-preload_instruments = ["SYMBOL1", "SYMBOL2"]
-```
-
-These are reconciliation-only. If they are non-zero at IBKR and have no virtual owner,
-`conductor doctor` must fail. Assign them to a real/synthetic book or remove them before go-live.
-
-**Production invariant:** all positions in the controlled IBKR account are modeled by Conductor.
-
-## 5. Paper connectivity smoke
-
-Start TWS paper trading or IB Gateway paper and configure the appropriate API port/account in
-`conductor.toml`.
-
-Start the worker:
+Then:
 
 ```powershell
-uv run conductor nautilus-worker windows_ibkr_equities --config conductor.toml
-```
-
-In another terminal:
-
-```powershell
-uv run conductor worker-status windows_ibkr_equities --config conductor.toml
+uv run conductor worker-status ibkr_main --config conductor.toml
+uv run conductor worker-status ibkr_tlaq --config conductor.toml
 uv run conductor status --config conductor.toml
 uv run conductor doctor --config conductor.toml
 ```
 
-The smoke must prove:
+The smoke must prove for **each** route:
 
-- worker heartbeat stays fresh;
-- IB account/NAV are visible;
-- all seeded instruments resolve;
-- prices are available;
+- fresh worker heartbeat;
+- configured account ID equals worker-reported account ID;
+- broker NAV is published;
+- seeded/current instruments resolve and have marks;
 - broker positions are visible;
-- restart of the worker recovers bridge state;
-- no unknown live position is silently mapped.
+- worker restart recovers bridge state;
+- no unknown position is silently assigned to a strategy.
 
-## 6. Paper order smoke
+`doctor` is read-only and should be clean across all controlled accounts before execution authority
+is enabled.
 
-Use a paper account and set:
+## 8. Strategy-run behavior
+
+Normal commands are:
+
+```powershell
+uv run conductor run ETSA --config conductor.toml
+uv run conductor run RPSchteroids --config conductor.toml
+uv run conductor run TLAQ --config conductor.toml
+```
+
+A run is route-scoped but portfolio-complete **within that route**. For example, running ETSA keeps
+RPS's current desired ownership in the `ibkr_main` aggregate while replacing only ETSA's new intent.
+It does not load, reconcile, flatten or borrow risk capacity from `ibkr_tlaq`.
+
+Internal crossing/netting is therefore allowed between ETSA and RPS when they want opposite changes
+in the same instrument. It never crosses ETSA/RPS against TLAQ because those trades belong to
+different physical accounts.
+
+## 9. Paper order smoke
+
+Use paper accounts and enable live submission only on the route being tested:
 
 ```toml
 live_orders_enabled = true
 ```
 
-Run a deliberately small test book through Conductor and verify:
+Prove a deliberately small order on each route independently and verify:
 
-- order reaches IBKR through Nautilus;
-- fill quantity/price comes back;
+- order reaches the intended IBKR account through its Nautilus worker;
+- fill quantity/price returns;
 - commission is captured when available;
-- aggregate broker state reconciles;
+- broker state reconciles on that route;
 - virtual ownership/cash commit only after reconciliation;
-- second identical Conductor cycle emits no trade.
+- a repeated unchanged cycle emits no trade;
+- the other account receives no order.
 
-Return `live_orders_enabled` to `false` after the paper order smoke.
+Return `live_orders_enabled` to `false` after the smoke.
 
-## 7. Live-account shadow
+## 10. Live-account shadow
 
-For the actual production account, use the live TWS/Gateway API port and account ID but keep:
+For the actual live accounts, use the live TWS/Gateway API port and real account IDs while keeping:
 
 ```toml
 live_orders_enabled = false
 ```
 
-Also enable API read-only at TWS/IB Gateway while practical for this phase.
-
-The worker publishes real account positions, NAV and market data. Conductor computes the exact
-portfolio/risk/netting result but does not enqueue orders.
-
-Run ETSA, RPS and TLAQ at their real production times while Dagster remains authoritative. Compare:
+Run ETSA, RPS and TLAQ at their normal production times while Dagster remains authoritative. Compare
+for every strategy:
 
 - native strategy result;
+- assigned route/account and broker NAV;
+- resolved strategy capital budget;
 - strategy target state;
-- strategy capital/cash input;
-- aggregate desired broker quantity;
+- aggregate desired quantity **within its route**;
 - proposed broker delta;
 - Dagster/legacy actual trade;
 - post-run broker position.
 
-Every mismatch gets explained before cutover. Do not normalize away mismatches merely to obtain a
-passing report.
+Explain every mismatch before cutover.
 
-## 8. Task Scheduler
+## 11. Task Scheduler
 
-Task Scheduler should call Conductor, not the strategy directly.
-
-Example action:
+Task Scheduler calls Conductor, not the underlying strategy directly:
 
 ```text
 Program:    powershell.exe
@@ -212,76 +298,62 @@ Arguments:  -File C:\Trading\Conductor\scripts\windows\run_strategy.ps1 \
             -Strategy ETSA -Config C:\Trading\Conductor\conductor.toml
 ```
 
-Create one task per strategy at the exact times currently used by the production Dagster jobs.
-Use the parameterized registration helper if useful:
+Create one task per strategy at the exact existing production schedule. Register/start one Nautilus
+worker per route/account. Do not collapse the workers into one route simply because they share a TWS
+process.
 
-```powershell
-.\scripts\windows\register_strategy_task.ps1 `
-  -Strategy ETSA `
-  -At "15:50" `
-  -Config "C:\Trading\Conductor\conductor.toml"
-```
-
-Do not infer or alter the production schedule during migration. Copy the known schedule exactly.
-
-The persistent Nautilus worker can be registered at machine startup/logon using
-`register_nautilus_worker_task.ps1`.
-
-## 9. Failure drills before live cutover
+## 12. Required failure drills
 
 At minimum test these in paper/shadow:
 
 1. run the same strategy twice concurrently — second run must be rejected;
-2. kill and restart the Nautilus worker — stale heartbeat must block Conductor;
-3. disconnect TWS/Gateway — Conductor must not use stale broker state;
-4. strategy subprocess exits non-zero — portfolio must not change;
-5. strategy times out — portfolio must not change;
-6. strategy returns malformed output — reject and audit;
-7. TLAQ delta output replay — absolute target remains idempotent;
-8. overlapping TLAQ/RPS symbol — only net aggregate delta reaches broker;
-9. manual broker mismatch — `doctor` fails;
-10. partial/rejected order — virtual ownership must not be invented as filled.
+2. kill its route worker — that route's strategy run must fail closed;
+3. kill the *other* route worker — unrelated strategy runs must remain operable;
+4. connect a worker to the wrong IBKR account — account check must fail closed;
+5. disconnect TWS/Gateway — stale broker state must not be used;
+6. strategy subprocess exits non-zero — portfolio ownership must not change;
+7. strategy times out or returns malformed output — portfolio ownership must not change;
+8. TLAQ delta output replay — absolute target remains idempotent;
+9. overlapping ETSA/RPS symbol — only their net `ibkr_main` delta reaches that broker account;
+10. same symbol held on TLAQ — it remains independent and is not cross-routed;
+11. manual broker mismatch — `doctor` fails;
+12. partial/rejected order — virtual ownership must not be invented as filled.
 
-Automated unit coverage currently exercises the concurrency lock, nonzero subprocess exit,
-subprocess timeout, malformed output, terminal rejection, and partial-fill-then-cancel cases while
-asserting that committed ownership and broker state remain unchanged. Terminal execution failures
-propagate as a blocked run instead of a successful or still-submitted run. This evidence is
-necessary but does not replace repeating the drills with the actual Windows scheduler, worker, and
-IBKR paper environment.
+Unit coverage is necessary but does not replace repeating these drills with the actual Windows
+scheduler, Nautilus workers and IBKR paper environment.
 
-## 10. Go-live gate
+## 13. Go-live gate
 
-Before turning on production execution:
+Before enabling production execution:
 
-- all 3 strategy seeds are approved;
-- every physical IBKR position is in Conductor reconciliation scope;
-- `conductor doctor` is clean;
-- worker heartbeat/reconciliation is clean;
-- multiple real-time shadow runs match the expected strategy/portfolio behavior;
-- failure drills pass;
-- run stdout/stderr and audit records are being persisted;
-- Windows Task Scheduler tasks are enabled at the exact production times;
-- Dagster execution can be disabled without disabling its rollback/reference code.
+- both route/account mappings are approved;
+- all strategy bootstrap ownership/cash is approved;
+- every controlled physical position is represented on the correct route;
+- both workers pass `worker-status` including account-ID match;
+- `conductor doctor` is clean across all routes;
+- paper order and restart drills pass independently for each route;
+- repeated live shadow runs have no unexplained mismatch;
+- Task Scheduler uses the unchanged production schedules;
+- Dagster can be disabled without destroying rollback/reference evidence.
 
-Then:
+Then transfer execution authority deliberately, route by route. Do not enable both accounts merely
+because one account has passed its gate.
 
-1. stop Dagster from submitting live orders;
-2. ensure only one Conductor/Nautilus worker owns execution authority;
-3. remove API read-only if it was enabled at TWS/IB Gateway;
-4. set `live_orders_enabled = true`;
-5. restart the Nautilus worker so the mode change is explicit;
-6. run `worker-status` and `doctor` again;
-7. permit the next scheduled Conductor strategy run.
-
-## 11. Rollback
+## 14. Rollback
 
 If Conductor cannot safely reconcile after cutover:
 
-1. `conductor disable <strategy>` for affected strategy jobs;
-2. set `live_orders_enabled = false` and restart the worker;
-3. preserve all SQLite/run artifacts — do not delete state;
-4. reconcile physical IBKR state and virtual ownership explicitly;
-5. only re-enable legacy execution after confirming it will not duplicate an already-applied
-   Conductor target.
+1. disable the affected strategy/route from scheduled execution;
+2. set that route's `live_orders_enabled = false` and restart its worker;
+3. preserve all Conductor and bridge SQLite/run artifacts;
+4. reconcile that physical account against virtual ownership explicitly;
+5. only re-enable legacy execution after confirming it will not duplicate an already-applied target.
 
 Rollback is an execution-authority change, not a database reset.
+
+## 15. Current limitation
+
+`max_margin_utilization` is represented in configuration/status but the current worker does not yet
+publish enough margin-utilization state for Conductor to enforce that limit. Gross, net and
+single-instrument risk are enforced per route; margin-utilization enforcement remains a promotion
+gap and must not be described as active protection yet.

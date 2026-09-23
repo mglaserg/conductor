@@ -5,7 +5,13 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Mapping
 
-from conductor.domain.models import ExposureType, InstrumentSpec, SleeveAllocation, VirtualTarget, ZERO
+from conductor.domain.models import (
+    ZERO,
+    ExposureType,
+    InstrumentSpec,
+    SleeveAllocation,
+    VirtualTarget,
+)
 from conductor.ledger import ConductorLedger
 
 
@@ -41,7 +47,7 @@ class VirtualRebalanceBuffer:
         self.allocations = dict(allocations)
         self.instruments = instruments
 
-    def _sleeve_capital(self, sleeve_id: str) -> Decimal:
+    def _sleeve_capital(self, sleeve_id: str, route_id: str) -> Decimal:
         configured = self.allocations.get(sleeve_id)
         if configured is None:
             return ZERO
@@ -50,17 +56,26 @@ class VirtualRebalanceBuffer:
             (
                 Decimal(row["allocated_capital"])
                 for row in self.ledger.strategy_accounts()
-                if row["strategy_id"] in strategy_ids
+                if row["strategy_id"] in strategy_ids and row["route_id"] == route_id
             ),
             ZERO,
         )
 
-    def apply(self, desired: list[VirtualTarget]) -> tuple[list[VirtualTarget], list[RebalanceBandDecision]]:
+    def apply(
+        self,
+        desired: list[VirtualTarget],
+        *,
+        route_ids: set[str] | None = None,
+    ) -> tuple[list[VirtualTarget], list[RebalanceBandDecision]]:
         desired_by_key = {
             (row.strategy_id, row.book_id, row.sleeve_id, row.route_id, row.instrument): row
             for row in desired
         }
-        current_rows = self.ledger.virtual_positions()
+        current_rows = [
+            row
+            for row in self.ledger.virtual_positions()
+            if route_ids is None or row["route_id"] in route_ids
+        ]
         current_by_key = {
             (
                 row["strategy_id"],
@@ -83,11 +98,12 @@ class VirtualRebalanceBuffer:
             band = ZERO if allocation is None else allocation.rebalance_band
             current_qty = sum((current_by_key.get(key, ZERO) for key in keys), ZERO)
             desired_qty = sum(
-                (desired_by_key[key].target if key in desired_by_key else ZERO for key in keys), ZERO
+                (desired_by_key[key].target if key in desired_by_key else ZERO for key in keys),
+                ZERO,
             )
             spec = self.instruments[instrument]
             delta_notional = (desired_qty - current_qty) * spec.unit_notional
-            capital_base = self._sleeve_capital(sleeve_id) if band > ZERO else ZERO
+            capital_base = self._sleeve_capital(sleeve_id, route_id) if band > ZERO else ZERO
             if band > ZERO and capital_base <= ZERO:
                 raise ValueError(
                     f"rebalance band configured for {sleeve_id} but allocated capital is zero"
@@ -108,7 +124,9 @@ class VirtualRebalanceBuffer:
             )
 
             if not suppressed:
-                implemented.extend(desired_by_key[key] for key in sorted(keys) if key in desired_by_key)
+                implemented.extend(
+                    desired_by_key[key] for key in sorted(keys) if key in desired_by_key
+                )
                 continue
 
             # Keep the sleeve/instrument exactly at its currently implemented ownership.

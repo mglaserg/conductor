@@ -6,8 +6,9 @@ Conductor is the portfolio control plane and strategy runtime for independent tr
 > risk, economic ownership, netting, audit, and desired broker state. NautilusTrader owns the
 > broker/exchange execution plumbing.**
 
-The first production migration is the Windows equities runtime: **ETSA + RPSchteroids + TLAQ**, all
-sharing one Interactive Brokers account while retaining separate virtual positions and cash.
+The first production migration is the Windows equities runtime: **ETSA + RPSchteroids + TLAQ**.
+ETSA and RPSchteroids share one Interactive Brokers capital pool/account; TLAQ can run in its own
+independently funded IBKR account from the same `conductor.toml`.
 
 ## V0.4 alpha — Dagster migration runtime
 
@@ -29,15 +30,15 @@ conductor run <strategy>
         |       TLAQ          -> share deltas
         |
         +--> normalize to absolute desired strategy state
-        +--> portfolio risk / sleeve rebalance policy
-        +--> internal crossing across virtual strategy books
-        +--> aggregate desired IBKR position
+        +--> route-backed capital pool allocation / risk
+        +--> internal crossing across books sharing that route
+        +--> aggregate desired position for that IBKR account
         |
         v
-local SQLite/WAL bridge
+route-specific SQLite/WAL bridge
         |
         v
-persistent NautilusTrader worker
+persistent NautilusTrader worker for that account
         |
         v
 official Nautilus Interactive Brokers adapter
@@ -50,30 +51,41 @@ TWS / IB Gateway
 
 `conductor run ETSA` is intentionally a short-lived Task Scheduler process. It should not open a new
 TWS connection, reconstruct order state, and reconnect to market data every time a strategy runs.
-One long-lived Nautilus worker owns the IBKR connection and continuously publishes broker state into
-a local durable bridge. The one-shot Conductor process reads that state and, in live mode, submits
-an aggregate execution request through the bridge.
+One long-lived Nautilus worker owns each configured IBKR route/account and continuously publishes
+that account's positions, NetLiquidation, instruments, and execution state into its own durable
+bridge. The one-shot Conductor process reads only the route needed by the strategy run and, in live
+mode, submits that account's aggregate execution request through the matching bridge.
 
 There is no Redis, RabbitMQ, or network service between them. Both processes run on the same Windows
 machine and use SQLite in WAL mode.
 
-## Shared-account virtual ownership
+## Account-backed capital pools and virtual ownership
 
-IBKR only knows the physical account position. Conductor knows economic ownership:
+A named portfolio is one independently funded capital pool, keyed by the execution route/account:
 
-```text
-TLAQ           AAPL +100     cash -$12,000
-RPSchteroids   AAPL  +50     cash  +$5,000
--------------------------------------------
-IBKR physical  AAPL +150
+```toml
+[portfolio.ibkr_main]
+allocator = "static"
+[portfolio.ibkr_main.static.weights]
+ETSA = 0.85
+RPSchteroids = 0.15
+
+[portfolio.ibkr_tlaq]
+allocator = "static"
+[portfolio.ibkr_tlaq.static.weights]
+TLAQ = 1.0
 ```
 
-TLAQ receives only its own positions/cash when it runs. RPS receives only its own. Negative virtual
-cash is permitted and represents strategy financing.
+Unless `nav = <number>` is supplied, each pool uses **that route's broker NetLiquidation**. So if
+`ibkr_main` has $200k, ETSA is budgeted $170k and RPS $30k. If `ibkr_tlaq` has $75k, TLAQ is
+budgeted $75k. Separate accounts never donate NAV/risk capacity to one another.
 
-If TLAQ wants +20 AAPL while RPS reduces AAPL by 15 shares, Conductor internally transfers 15 shares
-between their virtual books and sends only **BUY 5 AAPL** to IBKR. Internal crosses and external fill
-settlements are both audited.
+Within a shared account, Conductor still preserves virtual ownership and internal netting. For
+example, if ETSA wants +20 AAPL while RPS reduces AAPL by 15 shares on `ibkr_main`, Conductor can
+internally transfer 15 shares between their virtual books and send only **BUY 5 AAPL** to that
+account. A strategy on `ibkr_tlaq` is not part of that cross and is not touched by the run.
+
+Negative virtual cash remains permitted and represents strategy financing.
 
 ## Native strategy contracts
 
@@ -104,9 +116,9 @@ EQ.US.AAPL       -> AAPL=STK.SMART
 
 Futures and options will get explicit contract parsers rather than ambiguous string guessing.
 
-Nautilus receives one physical execution identity (`ConductorIbkr-001`) for the shared IB account.
-ETSA/RPS/TLAQ ownership remains in Conductor's virtual ledger. This avoids split ownership of the
-same net IBKR instrument inside Nautilus reconciliation.
+Each IBKR route has its own worker/API client IDs and bridge database. A worker must publish the
+configured IBKR account ID; Conductor fails closed if the worker is connected to a different
+account. Strategy ownership remains exclusively in Conductor's virtual ledger.
 
 ## Shadow mode is the default
 
@@ -122,6 +134,50 @@ This is the mode for Dagster-vs-Conductor comparison before cutover.
 
 For an additional safety layer during live-account shadowing, configure TWS/IB Gateway API access as
 read-only at the IB application itself.
+
+## One-file multi-account configuration
+
+The canonical hierarchy is **route/account -> capital pool -> strategies**. The portfolio block and
+route ID deliberately share the same name:
+
+```toml
+[portfolio.ibkr_main]
+allocator = "static"
+[portfolio.ibkr_main.static.weights]
+ETSA = 0.85
+RPSchteroids = 0.15
+
+[routes.ibkr_main]
+adapter = "nautilus_ibkr"
+account = "REPLACE_WITH_MAIN_ACCOUNT"
+bridge_db = "data/ibkr_main_bridge.sqlite"
+data_client_id = 1301
+exec_client_id = 1302
+live_orders_enabled = false
+
+[portfolio.ibkr_tlaq]
+allocator = "static"
+[portfolio.ibkr_tlaq.static.weights]
+TLAQ = 1.0
+
+[routes.ibkr_tlaq]
+adapter = "nautilus_ibkr"
+account = "REPLACE_WITH_TLAQ_ACCOUNT"
+bridge_db = "data/ibkr_tlaq_bridge.sqlite"
+data_client_id = 1311
+exec_client_id = 1312
+live_orders_enabled = false
+```
+
+A strategy's `route_id` selects both the execution account and the capital pool. All static weights
+for a pool must cover exactly the strategies assigned to that route and sum to 1.0. Per-pool risk
+overrides may be added under `[portfolio.<route_id>.risk]`; otherwise `[risk]` supplies defaults.
+Gross, net and single-instrument limits are enforced per route. `max_margin_utilization` is currently
+configuration/status only until the worker publishes the required account margin measurement.
+
+Changing `route_id` for an already-persisted strategy is intentionally **not** a hot config edit:
+Conductor refuses the mismatch until the book is explicitly migrated/bootstrap-reconciled on the
+destination account.
 
 ## Offline paper mode (Windows or Lubuntu)
 
@@ -140,30 +196,25 @@ This is a separate runtime, not shadow mode with submission suppressed. By defau
 go under `data/runs/paper`. Synthetic broker positions and fills are durable in the paper database.
 The configured live routes are never constructed or contacted.
 
-Configure deterministic offline marks and allocation as follows:
+For the canonical multi-account file, give each synthetic capital pool a paper-only NAV:
 
 ```toml
-[node]
-portfolio_nav = 100000
-
-[portfolio]
-allocator = "static"
-
-[portfolio.static.weights]
-ETSA = 0.40
-RPSchteroids = 0.15
-TLAQ = 0.45
-
 [paper]
 default_price = 100
+
+[paper.portfolio_navs]
+ibkr_main = 100000
+ibkr_tlaq = 100000
 
 [paper_prices]
 "EQ.US.AAPL" = 250
 ```
 
-A new paper book receives its allocated capital as both allocated capital and initial paper cash.
-For an explicit bootstrap override, use `strategies.<id>.paper_seed` with optional
-`allocated_capital`, `cash`, and `positions`. Normal `seed` values remain isolated from paper state.
+Those values are used only by `--paper`; live/shadow mode still reads each route's broker
+NetLiquidation. Legacy one-pool configs may continue to use numeric `node.portfolio_nav`. A new
+paper book receives its allocator-derived capital as both allocated capital and initial paper cash.
+`strategies.<id>.paper_seed.cash` and `.positions` can explicitly override bootstrap cash/ownership;
+normal `seed` values remain isolated from paper state.
 The same configuration and commands are portable to Lubuntu; only each strategy's configured
 `cwd` and `command` need to be valid on that node.
 
@@ -219,17 +270,22 @@ on the machine you may need to allow pre-releases when installing it directly.
 Copy [`examples/windows_etsa_rps_tlaq.toml`](examples/windows_etsa_rps_tlaq.toml) to
 `conductor.toml` and replace every placeholder before connecting to the production account.
 
-Start the persistent execution worker:
+Start one persistent worker per IBKR account route:
 
 ```powershell
-uv run conductor nautilus-worker windows_ibkr_equities --config conductor.toml
+uv run conductor nautilus-worker ibkr_main --config conductor.toml
+uv run conductor nautilus-worker ibkr_tlaq --config conductor.toml
 ```
 
-Check it independently:
+Check each independently:
 
 ```powershell
-uv run conductor worker-status windows_ibkr_equities --config conductor.toml
+uv run conductor worker-status ibkr_main --config conductor.toml
+uv run conductor worker-status ibkr_tlaq --config conductor.toml
 ```
+
+`worker-status` also verifies that the worker-reported IBKR account matches the account configured
+for that route.
 
 Run a strategy manually:
 
@@ -278,13 +334,15 @@ The V0.4 alpha contains a common allocator interface for:
 - ERC/risk-budget allocation with Ledoit-Wolf covariance;
 - deterministic fallbacks.
 
-For the September migration, persisted strategy capital is the sizing source and existing trusted
-allocations should remain static until strategy NAV/P&L history is cleanly attributable. The
-allocator implementations are present so we can switch later without changing strategy code.
+For the September migration, each account's broker NetLiquidation is the capital base and the
+named portfolio's resolved weights are persisted into each strategy's allocated-capital budget.
+Static allocation should remain the default until strategy NAV/P&L history is cleanly attributable;
+the inverse-vol/ERC implementations can later be selected independently per capital pool.
 
-Portfolio risk currently supports deterministic gross and single-instrument caps and preserves the
-existing ETSA/RPS sleeve rebalance-band semantics before TLAQ cross-strategy netting. Every risk,
-rebalance, execution, accounting and lifecycle decision is written to the audit ledger.
+Portfolio risk now applies gross, net, and single-instrument caps **per route/account**, and the
+final trade-size dust threshold also uses that route's NAV. Existing ETSA/RPS sleeve rebalance-band
+semantics remain available before same-account netting. Every allocation, risk, rebalance,
+execution, accounting and lifecycle decision is written to the audit ledger.
 
 ## Audit rule
 

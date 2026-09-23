@@ -19,3 +19,4 @@ Current records:
 3. `0003-nautilus-execution-kernel.md`
 4. `0004-sqlite-wal-local-bridge.md`
 5. `0005-independent-node-sources-of-truth.md`
+6. `0006-route-backed-capital-pools.md`

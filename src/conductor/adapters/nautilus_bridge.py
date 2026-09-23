@@ -336,12 +336,14 @@ class NautilusBridgeExecutionAdapter:
         live_orders_enabled: bool,
         worker_stale_after_seconds: int = 15,
         request_timeout_seconds: int = 60,
+        expected_account_id: str | None = None,
     ) -> None:
         self.store = NautilusBridgeStore(bridge_db)
         self.route_id = route_id
         self.live_orders_enabled = live_orders_enabled
         self.worker_stale_after_seconds = worker_stale_after_seconds
         self.request_timeout_seconds = request_timeout_seconds
+        self.expected_account_id = expected_account_id
 
     def _require_worker(self) -> dict:
         state = self.store.worker_state(self.route_id)
@@ -358,6 +360,12 @@ class NautilusBridgeExecutionAdapter:
         if not bool(state["ready"]):
             raise NautilusBridgeError(
                 f"Nautilus worker for {self.route_id} is not ready: {state.get('error') or 'unknown'}"
+            )
+        actual_account = state.get("account_id")
+        if self.expected_account_id is not None and actual_account != self.expected_account_id:
+            raise NautilusBridgeError(
+                f"Nautilus worker for {self.route_id} is connected to account "
+                f"{actual_account!r}, expected {self.expected_account_id!r}"
             )
         return state
 

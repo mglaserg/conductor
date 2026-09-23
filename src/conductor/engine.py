@@ -34,13 +34,14 @@ class ConductorEngine:
     ) -> RunResult:
         run_id = run_id or uuid4().hex
         resolved = self.intent_book.resolve(intents)
+        active_routes = {intent.route_id for intent in resolved}
         desired_virtual = self.portfolio.build_virtual_targets(resolved)
         desired_virtual, risk_decision = self.risk.apply(desired_virtual)
 
         if self.ledger:
             # Virtual targets mean desired/risk-adjusted economic state. Implemented
             # ownership can differ temporarily because of explicit rebalance bands.
-            self.ledger.replace_virtual_targets(desired_virtual)
+            self.ledger.replace_virtual_targets(desired_virtual, route_ids=active_routes)
             self.ledger.append_event(
                 "risk_decision",
                 {
@@ -49,14 +50,22 @@ class ConductorEngine:
                     "reason": risk_decision.reason,
                     "gross_before": str(risk_decision.gross_before),
                     "gross_after": str(risk_decision.gross_after),
+                    "net_before": str(risk_decision.net_before),
+                    "net_after": str(risk_decision.net_after),
+                    "route_scales": {
+                        key: str(value) for key, value in risk_decision.route_scales.items()
+                    },
+                    "route_reasons": dict(risk_decision.route_reasons),
                 },
             )
 
         if self.rebalance_buffer is not None:
-            implemented_virtual, band_decisions = self.rebalance_buffer.apply(desired_virtual)
+            implemented_virtual, band_decisions = self.rebalance_buffer.apply(
+                desired_virtual, route_ids=active_routes
+            )
         else:
             implemented_virtual, band_decisions = desired_virtual, []
-        metrics = self.portfolio.metrics(implemented_virtual)
+        metrics = self.portfolio.metrics(implemented_virtual, route_ids=active_routes)
         if self.ledger and band_decisions:
             for decision in band_decisions:
                 self.ledger.append_event(
@@ -76,7 +85,11 @@ class ConductorEngine:
                 )
 
         aggregate = self.portfolio.aggregate(implemented_virtual)
-        actual_before = self.execution.positions()
+        actual_before = [
+            position
+            for position in self.execution.positions()
+            if position.route_id in active_routes
+        ]
         raw_deltas = self.reconciler.reconcile(aggregate, actual_before)
         deltas = self.order_planner.plan(raw_deltas)
 
@@ -122,7 +135,11 @@ class ConductorEngine:
                     ],
                 },
             )
-        actual_after = self.execution.positions()
+        actual_after = [
+            position
+            for position in self.execution.positions()
+            if position.route_id in active_routes
+        ]
         reconciled = self.reconciler.is_reconciled(aggregate, actual_after)
         shadow_planned = any(report.status == "shadow" for report in execution_reports)
         terminal_failure = any(
@@ -147,10 +164,15 @@ class ConductorEngine:
         if reconciled and self.ledger:
             if self.accounting is not None:
                 self.accounting.commit(
-                    implemented_virtual, run_id=run_id, execution_reports=execution_reports
+                    implemented_virtual,
+                    run_id=run_id,
+                    execution_reports=execution_reports,
+                    route_ids=active_routes,
                 )
             else:
-                self.ledger.replace_virtual_positions(implemented_virtual)
+                self.ledger.replace_virtual_positions(
+                    implemented_virtual, route_ids=active_routes
+                )
 
         if self.ledger:
             self.ledger.record_run(

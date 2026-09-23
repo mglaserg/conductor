@@ -43,12 +43,14 @@ is calculated. The broker sees only the aggregate physical requirement.
 
 **Reason:** unnecessary round trips add cost and can temporarily misstate shared-account risk.
 
-## S6 — Route identity is part of position identity
+## S6 — Route identity is part of position and capital identity
 
-Positions net only when both canonical instrument and execution route match. Similar symbols on
-different brokers, accounts, venues, or node-local routes remain separate.
+Positions net only when both canonical instrument and execution route match. Each independently
+funded route/account also has its own NAV, allocation weights, risk capacity, and trade-size buffer.
+Similar symbols on different brokers, accounts, venues, or node-local routes remain separate.
 
-**Reason:** they may have different custody, collateral, contract, settlement, or execution risk.
+**Reason:** they may have different custody, collateral, capital, contract, settlement, or execution
+risk. One account must never donate unused NAV/risk capacity to another account.
 
 ## S7 — Unknown or stale state fails closed
 
@@ -87,7 +89,15 @@ required before an operator explicitly enables submission.
 
 **Reason:** configuration mistakes should produce proposed trades, not live trades.
 
-## S12 — Nodes remain independently safe
+## S12 — Account route changes require explicit migration
+
+Changing a configured `route_id` does not silently move a persisted strategy book to another broker
+account. Conductor refuses the mismatch until ownership/cash are explicitly migrated and bootstrap
+reconciliation proves the destination account.
+
+**Reason:** a route edit is an economic transfer of custody/capital, not a harmless naming change.
+
+## S13 — Nodes remain independently safe
 
 Each execution node retains its local source of truth and can trade, stop, reconcile, and recover
 without another node or a central dashboard. Fleet telemetry is outbound and read-only.
@@ -105,7 +115,9 @@ For every execution, accounting, routing, lifecycle, or persistence change, revi
 5. Does stale, missing, or ambiguous state block safely?
 6. Is the decision reconstructable after process or machine restart?
 7. Does shadow mode remain incapable of submitting an order?
-8. Is rollback possible without deleting evidence?
+8. Can a strategy run touch, flatten, or borrow capital from an unrelated route/account?
+9. Does a worker prove it is connected to the configured broker account?
+10. Is rollback possible without deleting evidence?
 
 The operational failure drills in `docs/WINDOWS_ETSA_RPS_TLAQ_MIGRATION.md` are the current concrete
 acceptance suite for these invariants.
