@@ -10,6 +10,9 @@ where the product is going; this file describes what is true now and what should
 Promote the V0.4 Windows migration runtime from locally implemented alpha code to an operationally
 proven replacement for Dagster orchestration and broker execution for ETSA, RPSchteroids, and TLAQ.
 
+- NautilusTrader `2.0.0rc4` is now a **required core runtime dependency**. Plain `uv sync`
+  installs the execution kernel; there is no separate Nautilus extra.
+
 The current Windows topology is intentionally multi-account in one configuration:
 
 - `ibkr_main`: ETSA + RPSchteroids share one independently funded IBKR capital pool;

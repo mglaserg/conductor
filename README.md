@@ -248,22 +248,23 @@ that account should be treated as an operational exception requiring explicit re
 
 Python 3.12+ and `uv` are recommended.
 
-Core + tests:
+Conductor includes NautilusTrader as a required execution dependency. A normal sync installs the
+complete runtime; there is no separate Nautilus extra.
 
 ```powershell
 uv venv --python 3.12
-uv pip install -e ".[dev]"
+uv sync
+```
+
+For development and tests:
+
+```powershell
+uv sync --extra dev
 uv run pytest -q
 ```
 
-Windows execution runtime:
-
-```powershell
-uv pip install -e ".[nautilus]"
-```
-
-Nautilus currently publishes pre-release 2.x wheels, so depending on the package version available
-on the machine you may need to allow pre-releases when installing it directly.
+Conductor pins the NautilusTrader version it is verified against so `uv sync` produces a runnable
+execution environment instead of a core-only installation.
 
 ## Windows runtime commands
 

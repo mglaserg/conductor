@@ -155,11 +155,11 @@ uv run conductor validate path\to\target-snapshot.json
 
 Use a real generated snapshot path for `validate`.
 
-Windows/Nautilus work additionally requires the optional runtime and the paper/shadow checks in the
-migration guide:
+NautilusTrader is a required Conductor runtime dependency. For Windows/Nautilus work, sync the
+normal runtime plus development tools and run the paper/shadow checks in the migration guide:
 
 ```powershell
-uv sync --extra dev --extra nautilus --prerelease allow
+uv sync --extra dev
 uv run conductor-nautilus-smoke
 uv run conductor worker-status ibkr_main --config conductor.toml
 uv run conductor worker-status ibkr_tlaq --config conductor.toml

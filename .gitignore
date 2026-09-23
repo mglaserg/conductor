@@ -7,3 +7,5 @@ __pycache__/
 *.sqlite-wal
 *.sqlite-shm
 .env
+
+*.egg-info/

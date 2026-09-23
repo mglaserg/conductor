@@ -9,7 +9,7 @@ class NautilusVersionError(RuntimeError):
 
 
 def check_nautilus_v2() -> str:
-    """Fail fast unless the optional NautilusTrader v2 runtime is installed.
+    """Fail fast unless the required NautilusTrader v2 runtime is installed.
 
     Conductor deliberately keeps Nautilus types outside the domain model. This
     module is the anti-corruption boundary where the concrete live/sandbox bridge
@@ -19,7 +19,7 @@ def check_nautilus_v2() -> str:
         installed = version("nautilus_trader")
     except PackageNotFoundError as exc:
         raise NautilusVersionError(
-            "NautilusTrader is not installed. Install the optional 'nautilus' extra."
+            "NautilusTrader is a required Conductor dependency but is not installed. Run `uv sync`."
         ) from exc
 
     if not installed.startswith("2."):

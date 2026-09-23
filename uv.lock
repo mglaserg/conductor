@@ -218,9 +218,10 @@ wheels = [
 
 [[package]]
 name = "conductor-trading"
-version = "0.4.0a2"
+version = "0.4.0a5"
 source = { editable = "." }
 dependencies = [
+    { name = "nautilus-trader" },
     { name = "pydantic" },
 ]
 
@@ -241,13 +242,9 @@ dev = [
     { name = "scikit-learn" },
     { name = "scipy" },
 ]
-nautilus = [
-    { name = "nautilus-trader" },
-]
-
 [package.metadata]
 requires-dist = [
-    { name = "nautilus-trader", marker = "extra == 'nautilus'", specifier = ">=2.0.0rc0,<3" },
+    { name = "nautilus-trader", specifier = "==2.0.0rc4" },
     { name = "numpy", marker = "extra == 'allocation'", specifier = ">=2.0" },
     { name = "numpy", marker = "extra == 'dev'", specifier = ">=2.0" },
     { name = "pandas", marker = "extra == 'dashboard'", specifier = ">=2.2,<3" },
@@ -260,7 +257,7 @@ requires-dist = [
     { name = "scipy", marker = "extra == 'dev'", specifier = ">=1.13" },
     { name = "streamlit", marker = "extra == 'dashboard'", specifier = ">=1.39,<2" },
 ]
-provides-extras = ["dev", "allocation", "dashboard", "nautilus"]
+provides-extras = ["dev", "allocation", "dashboard"]
 
 [[package]]
 name = "h11"

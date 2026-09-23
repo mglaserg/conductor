@@ -4,13 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "conductor-trading"
-version = "0.4.0a4"
+version = "0.4.0a5"
 description = "Portfolio control plane and strategy runtime for multi-strategy trading"
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "Proprietary"}
 authors = [{name = "Conductor"}]
-dependencies = ["pydantic>=2.8,<3"]
+dependencies = [
+    "pydantic>=2.8,<3",
+    "nautilus_trader==2.0.0rc4",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -22,8 +25,6 @@ dev = [
 ]
 allocation = ["numpy>=2.0", "scipy>=1.13", "scikit-learn>=1.5"]
 dashboard = ["streamlit>=1.39,<2", "pandas>=2.2,<3"]
-# NautilusTrader is the primary broker/exchange execution kernel.
-nautilus = ["nautilus_trader>=2.0.0rc0,<3"]
 
 [project.scripts]
 conductor = "conductor.command:main"

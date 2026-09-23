@@ -3,6 +3,21 @@
 All notable changes to Conductor are recorded here. Until a stable release process exists, entries
 follow a lightweight Keep a Changelog structure and use repository tags as the historical anchors.
 
+## 0.4.0a5 - 2026-09-23
+
+### Changed
+
+- Made NautilusTrader a required Conductor runtime dependency instead of an optional `nautilus`
+  extra.
+- Pinned the verified NautilusTrader runtime to `2.0.0rc4` so plain `uv sync` installs the execution
+  kernel Conductor actually requires.
+- Updated runtime diagnostics and operator documentation so a normal sync is the canonical
+  installation path.
+- Added a packaging regression test that prevents NautilusTrader from silently becoming optional
+  again.
+- Stopped tracking generated `*.egg-info` metadata so stale package metadata cannot contradict
+  `pyproject.toml`.
+
 ## Unreleased
 
 ### Added
