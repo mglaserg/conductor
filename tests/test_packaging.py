@@ -10,6 +10,7 @@ def test_nautilus_is_a_required_runtime_dependency() -> None:
 
     dependencies = project["dependencies"]
     assert any(dep.startswith("nautilus_trader==") for dep in dependencies)
+    assert any(dep.startswith("nautilus_ibapi==") for dep in dependencies)
 
     optional = project.get("optional-dependencies", {})
     assert "nautilus" not in optional

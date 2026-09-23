@@ -120,6 +120,26 @@ Each IBKR route has its own worker/API client IDs and bridge database. A worker 
 configured IBKR account ID; Conductor fails closed if the worker is connected to a different
 account. Strategy ownership remains exclusively in Conductor's virtual ledger.
 
+### Account NAV fallback
+
+Nautilus remains authoritative for execution, positions, fills, instruments and reconciliation.
+For broker NAV only, the worker has one narrow fallback for linked/multi-account TWS sessions where
+Nautilus has registered the correct account but its typed account state contains no usable
+`NetLiquidation`. A separate read-only TWS API client requests:
+
+```text
+reqAccountSummary(group="All", tags="NetLiquidation")
+```
+
+Conductor accepts only the callback whose native account code exactly matches the route's configured
+`account`. Values for any other linked account are ignored. The direct value is refreshed off the
+Nautilus event loop, expires when stale, and never enables cross-account NAV fallback.
+
+The fallback connection uses `account_summary_client_id` (default: `exec_client_id + 10000`).
+`account_summary_refresh_seconds`, `account_summary_stale_after_seconds`,
+`account_summary_timeout_seconds`, and `account_summary_fallback_enabled` are configurable per
+route.
+
 ## Shadow mode is the default
 
 In the Windows template:
@@ -153,6 +173,7 @@ account = "REPLACE_WITH_MAIN_ACCOUNT"
 bridge_db = "data/ibkr_main_bridge.sqlite"
 data_client_id = 1301
 exec_client_id = 1302
+account_summary_client_id = 11302
 live_orders_enabled = false
 
 [portfolio.ibkr_tlaq]
@@ -166,6 +187,7 @@ account = "REPLACE_WITH_TLAQ_ACCOUNT"
 bridge_db = "data/ibkr_tlaq_bridge.sqlite"
 data_client_id = 1311
 exec_client_id = 1312
+account_summary_client_id = 11312
 live_orders_enabled = false
 ```
 

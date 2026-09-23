@@ -318,3 +318,55 @@ def test_route_scoped_runtime_does_not_require_unrelated_account(tmp_path, monke
         assert {delta.route_id for delta in outcome.portfolio_result.deltas} == {"ibkr_main"}
     finally:
         app.close()
+
+
+def test_route_account_summary_client_ids_are_derived_per_route(tmp_path):
+    config_path = tmp_path / "conductor.toml"
+    config_path.write_text(
+        '''
+[node]
+id = "windows"
+state_db = "data/conductor.sqlite"
+run_root = "data/runs"
+
+[portfolio.ibkr_main]
+allocator = "static"
+[portfolio.ibkr_main.static.weights]
+ETSA = 1.0
+
+[portfolio.ibkr_tlaq]
+allocator = "static"
+[portfolio.ibkr_tlaq.static.weights]
+TLAQ = 1.0
+
+[routes.ibkr_main]
+adapter = "nautilus_ibkr"
+account = "U_MAIN"
+exec_client_id = 1302
+
+[routes.ibkr_tlaq]
+adapter = "nautilus_ibkr"
+account = "U_TLAQ"
+exec_client_id = 1312
+account_summary_client_id = 2312
+
+[strategies.ETSA]
+result_mode = "target_weights"
+route_id = "ibkr_main"
+cwd = "."
+command = ["python", "etsa.py"]
+
+[strategies.TLAQ]
+result_mode = "position_deltas"
+route_id = "ibkr_tlaq"
+cwd = "."
+command = ["python", "tlaq.py"]
+''',
+        encoding="utf-8",
+    )
+    from conductor.config import load_runtime_config
+
+    config = load_runtime_config(config_path)
+    assert config.routes["ibkr_main"].account_summary_client_id == 11302
+    assert config.routes["ibkr_tlaq"].account_summary_client_id == 2312
+    assert config.routes["ibkr_tlaq"].account_summary_fallback_enabled is True

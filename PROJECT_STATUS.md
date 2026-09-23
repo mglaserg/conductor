@@ -10,8 +10,7 @@ where the product is going; this file describes what is true now and what should
 Promote the V0.4 Windows migration runtime from locally implemented alpha code to an operationally
 proven replacement for Dagster orchestration and broker execution for ETSA, RPSchteroids, and TLAQ.
 
-- NautilusTrader `2.0.0rc4` is now a **required core runtime dependency**. Plain `uv sync`
-  installs the execution kernel; there is no separate Nautilus extra.
+- NautilusTrader `2.0.0rc4` and Nautech's `nautilus_ibapi` account-summary client are **required core runtime dependencies**. Plain `uv sync` installs both; there is no separate Nautilus extra.
 
 The current Windows topology is intentionally multi-account in one configuration:
 
@@ -39,6 +38,8 @@ cutover checklist in `docs/WINDOWS_ETSA_RPS_TLAQ_MIGRATION.md` are satisfied.
 - TOML-driven node, route, strategy, risk, seed and execution configuration;
 - **route-backed named capital pools** using `[portfolio.<route_id>]` in one file;
 - broker `NetLiquidation` as the default live/shadow NAV source independently for each route;
+- exact-account direct IB `reqAccountSummary(NetLiquidation)` fallback when Nautilus has the right
+  account but no usable NAV, with off-loop refresh, staleness expiry and strict account filtering;
 - per-pool static/inverse-vol/ERC selection and deterministic fallback configuration;
 - allocator-derived strategy capital budgets refreshed from each route's NAV;
 - per-route gross, net and single-instrument risk scaling;
@@ -67,7 +68,7 @@ paper, shadow, or production validation.
 
 ## Verification state
 
-- Full automated suite on 2026-09-23: **66 passed**.
+- Full automated suite on 2026-09-23: **72 passed**.
 - New multi-account coverage verifies:
   - independent broker NAVs and 85/15 + 100% strategy budgeting;
   - exact strategy membership/weight validation per route;
@@ -79,6 +80,8 @@ paper, shadow, or production validation.
   - namespaced Nautilus `AccountId` resolution from the live cache before account-scoped NAV lookup;
   - raw `NetLiquidation` extraction from the reported account event before portfolio valuation, so
     an empty initial IB margin snapshot cannot trigger Nautilus's currency panic;
+  - direct IB `reqAccountSummary(NetLiquidation)` fallback accepting only the exact configured
+    native account, including rejection of other-account and conflicting-account-summary values;
   - account-balance fallback and fail-closed behavior when the configured IB account is not the
     account registered in Nautilus.
 - Existing tests continue to cover protocol, ledger, portfolio construction, accounting,
@@ -110,9 +113,9 @@ Never summarize the current state as production-ready.
    native account code. IB returns error 321. Keep `live_orders_enabled = false` until that fill
    reconciliation path is fixed or Conductor moves to a verified patched Nautilus build.
 2. Both physical IBKR routes still need clean worker smokes proving non-null NAV, positions,
-   instruments, marks, restart recovery and stale-worker blocking. TLAQ now reaches its intended
-   TWS/account but its first observed AccountState had no typed balances and exposed the upstream
-   reconciliation defect above.
+   instruments, marks, restart recovery and stale-worker blocking. TLAQ reaches its intended
+   TWS/account; a7 adds a direct exact-account NetLiquidation fallback specifically for the empty
+   Nautilus AccountState observed there, but that path still requires Windows/TWS validation.
 3. Initial virtual positions and cash require human approval against the correct physical account.
 4. `max_margin_utilization` is represented in configuration/status but is **not yet enforced**;
    current worker state does not publish the required margin-utilization measurement.

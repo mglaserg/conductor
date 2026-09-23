@@ -158,6 +158,8 @@ port = 7496
 
 data_client_id = 1301
 exec_client_id = 1302
+# Separate read-only TWS connection used only if Nautilus has no account-scoped NAV.
+account_summary_client_id = 11302
 
 market_data_type = "REALTIME"
 
@@ -190,6 +192,8 @@ port = 7496
 
 data_client_id = 1311
 exec_client_id = 1312
+# Exact-account reqAccountSummary(NetLiquidation) fallback; never shares NAV across accounts.
+account_summary_client_id = 11312
 
 market_data_type = "REALTIME"
 

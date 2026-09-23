@@ -98,6 +98,7 @@ host = "127.0.0.1"
 port = 7496
 data_client_id = 1301
 exec_client_id = 1302
+account_summary_client_id = 11302
 bridge_db = "data/nautilus_ibkr_main_bridge.sqlite"
 live_orders_enabled = false
 
@@ -108,12 +109,16 @@ host = "127.0.0.1"
 port = 7496
 data_client_id = 1311
 exec_client_id = 1312
+account_summary_client_id = 11312
 bridge_db = "data/nautilus_ibkr_tlaq_bridge.sqlite"
 live_orders_enabled = false
 ```
 
 Conductor fails closed when the worker-reported account ID does not match the account configured
-for that route.
+for that route. If Nautilus has registered the correct account but its typed account state has no
+usable NAV, the worker opens a separate read-only TWS API connection and requests
+`reqAccountSummary("All", "NetLiquidation")`. Only the exact configured native account callback is
+accepted; linked-account values are ignored. This fallback never handles orders, fills or positions.
 
 Start both workers with:
 

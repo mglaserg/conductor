@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.0a7 - 2026-09-23
+
+### Added
+
+- Added an exact-account Interactive Brokers `reqAccountSummary` fallback for `NetLiquidation` when
+  Nautilus has registered the configured account but its account state still has no usable NAV.
+- The fallback runs on a separate TWS API client/thread, filters callbacks by the native configured
+  account code, caches only fresh values, and fails closed on ambiguity, timeout, staleness, or
+  account mismatch.
+- Added per-route account-summary client/refresh/staleness settings and status diagnostics.
+- Added Nautech's `nautilus_ibapi` mirror as a required runtime dependency so plain `uv sync`
+  installs the direct account-summary client together with NautilusTrader.
+
+### Safety
+
+- Nautilus remains the sole execution/position/fill/reconciliation backend. The direct IB API path
+  is read-only and is used only for the scalar broker NAV.
+- A linked account's NAV can never be substituted for another route: only an exact native account
+  callback match is accepted.
+
 All notable changes to Conductor are recorded here. Until a stable release process exists, entries
 follow a lightweight Keep a Changelog structure and use repository tags as the historical anchors.
 

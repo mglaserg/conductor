@@ -18,6 +18,11 @@ class RouteConfig:
     port: int = 7497
     data_client_id: int = 1301
     exec_client_id: int = 1302
+    account_summary_client_id: int = 11302
+    account_summary_fallback_enabled: bool = True
+    account_summary_refresh_seconds: int = 10
+    account_summary_stale_after_seconds: int = 30
+    account_summary_timeout_seconds: int = 5
     live_orders_enabled: bool = False
     bridge_db: Path | None = None
     instrument_cache_path: Path | None = None
@@ -396,12 +401,30 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         bridge_raw = item.get("bridge_db")
         cache_raw = item.get("instrument_cache_path")
         legacy_client_id = int(item.get("client_id", 1301))
-        routes[route_id] = RouteConfig(
+        route_config = RouteConfig(
             route=route,
             host=str(item.get("host", "127.0.0.1")),
             port=int(item.get("port", 7497)),
             data_client_id=int(item.get("data_client_id", legacy_client_id)),
             exec_client_id=int(item.get("exec_client_id", legacy_client_id + 1)),
+            account_summary_client_id=int(
+                item.get(
+                    "account_summary_client_id",
+                    int(item.get("exec_client_id", legacy_client_id + 1)) + 10000,
+                )
+            ),
+            account_summary_fallback_enabled=bool(
+                item.get("account_summary_fallback_enabled", True)
+            ),
+            account_summary_refresh_seconds=int(
+                item.get("account_summary_refresh_seconds", 10)
+            ),
+            account_summary_stale_after_seconds=int(
+                item.get("account_summary_stale_after_seconds", 30)
+            ),
+            account_summary_timeout_seconds=int(
+                item.get("account_summary_timeout_seconds", 5)
+            ),
             live_orders_enabled=bool(item.get("live_orders_enabled", False)),
             bridge_db=(
                 _resolve_path(base, str(bridge_raw))
@@ -419,6 +442,19 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
             market_data_type=str(item.get("market_data_type", "REALTIME")),
             preload_instruments=tuple(str(value) for value in item.get("preload_instruments", [])),
         )
+        if route_config.account_summary_refresh_seconds <= 0:
+            raise ValueError(f"routes.{route_id}.account_summary_refresh_seconds must be positive")
+        if (
+            route_config.account_summary_stale_after_seconds
+            <= route_config.account_summary_refresh_seconds
+        ):
+            raise ValueError(
+                f"routes.{route_id}.account_summary_stale_after_seconds must exceed "
+                "account_summary_refresh_seconds"
+            )
+        if route_config.account_summary_timeout_seconds <= 0:
+            raise ValueError(f"routes.{route_id}.account_summary_timeout_seconds must be positive")
+        routes[route_id] = route_config
 
     strategies: dict[str, StrategyRunnerProfile] = {}
     seeds: dict[str, StrategySeed] = {}

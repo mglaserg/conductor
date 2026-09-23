@@ -8,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from conductor.adapters.ibkr_account_summary import IbkrAccountSummaryNavProvider
 from conductor.adapters.nautilus import check_nautilus_v2
 from conductor.adapters.nautilus_bridge import NautilusBridgeStore, execution_report_payload
 from conductor.config import RuntimeConfig, load_runtime_config
@@ -297,12 +298,14 @@ class _BridgeStrategyMixin:
         account: str,
         live_orders_enabled: bool,
         order_timeout_seconds: int,
+        account_summary_nav_provider: IbkrAccountSummaryNavProvider | None = None,
     ) -> None:
         self._bridge_store = store
         self._bridge_route_id = route_id
         self._bridge_account = account
         self._bridge_live = live_orders_enabled
         self._order_timeout_seconds = order_timeout_seconds
+        self._account_summary_nav_provider = account_summary_nav_provider
         self._pending_resolves: dict[str, tuple[str, Any]] = {}
         self._orders: dict[str, _TrackedOrder] = {}
         self._request_orders: dict[str, set[str]] = {}
@@ -592,9 +595,23 @@ class _BridgeStrategyMixin:
             venue_type=Venue,
             cache=self.cache,
         )
+        direct_nav_currency = None
+        direct_nav_age_seconds = None
+        direct_nav_error = None
+        if nav is None and self._account_summary_nav_provider is not None:
+            self._account_summary_nav_provider.ensure_refresh()
+            direct_nav, direct_nav_currency, direct_nav_error, direct_nav_age_seconds = (
+                self._account_summary_nav_provider.current()
+            )
+            if direct_nav is not None:
+                nav = direct_nav
+                nav_source = "ibkr.reqAccountSummary(NetLiquidation)"
+
         if nav is None and ready:
             ready = False
-            if nautilus_account_id is None:
+            if direct_nav_error:
+                error = error or direct_nav_error
+            elif nautilus_account_id is None:
                 error = error or (
                     f"Nautilus cache has no account ID matching configured IB account "
                     f"{self._bridge_account}"
@@ -615,13 +632,15 @@ class _BridgeStrategyMixin:
                     None if nautilus_account_id is None else str(nautilus_account_id)
                 ),
                 "nav_source": nav_source,
+                "direct_nav_currency": direct_nav_currency,
+                "direct_nav_age_seconds": direct_nav_age_seconds,
+                "direct_nav_error": direct_nav_error,
             },
         )
 
 
 def _import_nautilus() -> dict[str, Any]:
-    # Keeping imports local lets the rest of Conductor (including strategy processes/tests) run
-    # without installing the optional heavy Nautilus runtime.
+    # Keep imports local so non-worker code paths do not eagerly import the heavy Nautilus runtime.
     from nautilus_trader.model import (
         AccountId,
         InstrumentId,
@@ -736,6 +755,19 @@ def run_nautilus_ibkr_worker(config_path: str | Path, route_id: str) -> None:
         fetch_all_open_orders=True,
         instrument_provider=provider_config,
     )
+    account_summary_nav_provider = (
+        IbkrAccountSummaryNavProvider(
+            host=route_cfg.host,
+            port=route_cfg.port,
+            client_id=route_cfg.account_summary_client_id,
+            account=route_cfg.route.account,
+            refresh_seconds=route_cfg.account_summary_refresh_seconds,
+            stale_after_seconds=route_cfg.account_summary_stale_after_seconds,
+            timeout_seconds=route_cfg.account_summary_timeout_seconds,
+        )
+        if route_cfg.account_summary_fallback_enabled
+        else None
+    )
 
     class ConductorIbkrStrategy(Strategy, _BridgeStrategyMixin):
         def __init__(self) -> None:
@@ -759,6 +791,7 @@ def run_nautilus_ibkr_worker(config_path: str | Path, route_id: str) -> None:
                 account=route_cfg.route.account,
                 live_orders_enabled=route_cfg.live_orders_enabled,
                 order_timeout_seconds=route_cfg.order_timeout_seconds,
+                account_summary_nav_provider=account_summary_nav_provider,
             )
 
         # Explicitly bind mixin callbacks so the extension type dispatches to Python methods.
