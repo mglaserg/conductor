@@ -483,12 +483,20 @@ class _BridgeStrategyMixin:
             raise
 
     def _ensure_quote_subscription(self, instrument_id: Any) -> None:
+        """Subscribe one instrument through the IB data client explicitly.
+
+        Qualified IB stocks can carry their listing venue in the Nautilus ID (for example
+        ``AUB=STK.NYSE``).  Letting Nautilus infer the client from that venue can misroute the
+        subscription away from the logical ``IB`` data client.  Route explicitly, matching
+        Nautilus' own Interactive Brokers live examples.
+        """
         key = self._instrument_key(instrument_id)
         if key in self._quote_subscriptions:
             return
         self._quote_subscriptions.add(key)
         try:
-            self.subscribe_quotes(instrument_id)
+            ClientId = _import_nautilus()["ClientId"]
+            self.subscribe_quotes(instrument_id, client_id=ClientId.from_str("IB"))
         except Exception:
             self._quote_subscriptions.discard(key)
             raise
@@ -545,7 +553,10 @@ class _BridgeStrategyMixin:
 
         instrument_id = instrument.id
         self._instrument_requests_inflight.discard(canonical)
-        self._ensure_quote_subscription(instrument_id)
+
+        # Persist the successful qualification *before* attempting market-data subscription.
+        # If quote routing fails, never lose the authoritative IB/Nautilus identity and later
+        # misreport the request as a contract-qualification timeout.
         self._bridge_store.upsert_instrument(
             self._bridge_route_id,
             canonical,
@@ -566,6 +577,7 @@ class _BridgeStrategyMixin:
                 pending[canonical] = instrument_id
         self.log.info(f"Qualified {canonical} -> {instrument_id}")
 
+        self._ensure_quote_subscription(instrument_id)
         self._refresh_pending_resolves()
         self._refresh_pending_warms()
 

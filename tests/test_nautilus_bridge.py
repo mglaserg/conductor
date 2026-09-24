@@ -584,6 +584,62 @@ def test_qualified_stock_response_binds_returned_listing_venue(monkeypatch):
     assert upserts[0][1]["broker_id"] == "123456"
 
 
+
+def test_qualified_stock_is_persisted_before_quote_subscription(monkeypatch):
+    from types import SimpleNamespace
+
+    from conductor.adapters.nautilus_ibkr_worker import _BridgeStrategyMixin
+
+    class FakeId:
+        def __init__(self, value: str, venue: str):
+            self.value = value
+            self.venue = venue
+            self.symbol = value.split(".", 1)[0]
+
+        def __str__(self):
+            return self.value
+
+    instrument_id = FakeId("AUB=STK.NYSE", "NYSE")
+    instrument = SimpleNamespace(
+        id=instrument_id,
+        raw_symbol="AUB",
+        multiplier=1,
+        size_increment=1,
+        info={"contract": {"conId": 366504295}},
+    )
+
+    upserts = []
+    store = SimpleNamespace(
+        upsert_instrument=lambda *args, **kwargs: upserts.append((args, kwargs)),
+        fail=lambda *_args, **_kwargs: None,
+    )
+    fake = SimpleNamespace(
+        _bridge_store=store,
+        _bridge_route_id="ibkr_main",
+        _pending_resolves={"REQ1": ("EQ.US.AUB", None, 999.0)},
+        _pending_warms={},
+        _instrument_requests_inflight={"EQ.US.AUB"},
+        _ensure_quote_subscription=lambda _value: (_ for _ in ()).throw(
+            RuntimeError("quote route failed")
+        ),
+        _refresh_pending_resolves=lambda: None,
+        _refresh_pending_warms=lambda: None,
+        log=SimpleNamespace(info=lambda *_args, **_kwargs: None),
+    )
+
+    try:
+        _BridgeStrategyMixin.on_instrument(fake, instrument)
+    except RuntimeError as exc:
+        assert str(exc) == "quote route failed"
+    else:
+        raise AssertionError("expected quote subscription failure")
+
+    assert upserts[0][0][:2] == ("ibkr_main", "EQ.US.AUB")
+    assert upserts[0][1]["nautilus_instrument_id"] == "AUB=STK.NYSE"
+    assert upserts[0][1]["broker_id"] == "366504295"
+    assert fake._pending_resolves["REQ1"][1] is instrument_id
+    assert fake._instrument_requests_inflight == set()
+
 def test_expired_cold_stock_resolution_fails_and_clears_inflight(monkeypatch):
     from types import SimpleNamespace
 

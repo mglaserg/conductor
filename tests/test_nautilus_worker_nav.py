@@ -238,19 +238,29 @@ def test_live_worker_never_uses_venue_wide_nav_after_account_resolution() -> Non
     assert source is None
 
 
-def test_worker_quote_subscription_is_deduplicated() -> None:
+def test_worker_quote_subscription_is_deduplicated_and_routed_to_ib(monkeypatch) -> None:
+    import conductor.adapters.nautilus_ibkr_worker as worker_module
     from conductor.adapters.nautilus_ibkr_worker import _BridgeStrategyMixin
+
+    class ClientId:
+        @staticmethod
+        def from_str(value):
+            return value
+
+    monkeypatch.setattr(worker_module, "_import_nautilus", lambda: {"ClientId": ClientId})
 
     worker = object.__new__(_BridgeStrategyMixin)
     worker._quote_subscriptions = set()
-    calls: list[str] = []
-    worker.subscribe_quotes = lambda instrument_id: calls.append(str(instrument_id))
+    calls: list[tuple[str, str]] = []
+    worker.subscribe_quotes = lambda instrument_id, *, client_id=None: calls.append(
+        (str(instrument_id), client_id)
+    )
 
-    worker._ensure_quote_subscription("AAPL=STK.SMART")
-    worker._ensure_quote_subscription("AAPL=STK.SMART")
-    worker._ensure_quote_subscription("AAPL=STK.SMART")
+    worker._ensure_quote_subscription("AUB=STK.NYSE")
+    worker._ensure_quote_subscription("AUB=STK.NYSE")
+    worker._ensure_quote_subscription("AUB=STK.NYSE")
 
-    assert calls == ["AAPL=STK.SMART"]
+    assert calls == [("AUB=STK.NYSE", "IB")]
 
 
 def test_worker_instrument_request_is_deduplicated_while_pending(monkeypatch) -> None:

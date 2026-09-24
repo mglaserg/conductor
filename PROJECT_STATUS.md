@@ -7,7 +7,7 @@ where the product is going; this file describes what is true now and what should
 
 ## Current objective
 
-Cold US-equity targets now use IB contract dictionaries for qualification and bind Conductor canonical IDs from Nautilus's actual `on_instrument()` callback to the authoritative instrument IDs returned by IB (including primary/listing venues); failed qualification is short-lived and retryable.
+Cold US-equity targets use IB contract dictionaries for qualification and bind Conductor canonical IDs from Nautilus's actual `on_instrument()` callback to the authoritative instrument IDs returned by IB (including primary/listing venues). Quote subscriptions are explicitly routed through logical client `IB`, and the qualified mapping is persisted before quote subscription so market-data errors cannot masquerade as qualification timeouts.
 
 
 Promote the V0.4 Windows migration runtime from locally implemented alpha code to an operationally
@@ -58,7 +58,7 @@ cutover checklist in `docs/WINDOWS_ETSA_RPS_TLAQ_MIGRATION.md` are satisfied.
 - batch target-universe warm-up API with **serialized** cold IBKR contract qualification, so only one
   missing symbol is in-flight at a time while instrument-request and quote-subscription dedupe stays
   active; the worker binds the returned listing-venue Nautilus ID to Conductor's canonical ID, and
-  each cold symbol gets its own bridge timeout and exact-symbol diagnostics;
+  each cold symbol gets its own bridge timeout and exact-symbol diagnostics; qualified listing-venue instruments subscribe explicitly through client `IB`;
 - configured-vs-worker-reported IBKR account-ID validation that fails closed;
 - one-shot strategy subprocess orchestration with persisted run inputs and outputs;
 - native `target_weights`, `target_quantities`, and `position_deltas` result modes;
@@ -85,7 +85,7 @@ paper, shadow, or production validation.
 
 ## Verification state
 
-- Full automated suite on 2026-09-24: **93 passed**.
+- Full automated suite on 2026-09-24: **94 passed**.
 - New multi-account coverage verifies:
   - independent broker NAVs and 85/15 + 100% strategy budgeting;
   - exact strategy membership/weight validation per route;

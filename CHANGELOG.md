@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.0a16 - 2026-09-24
+
+### Fixed
+
+- Explicitly route every IB quote subscription through Nautilus client `IB`. Qualified US stocks
+  can carry their listing venue in the Nautilus instrument ID (for example `AUB=STK.NYSE`);
+  allowing client inference from that venue could route market-data subscription away from the IB
+  data client immediately after successful qualification.
+- Persist the authoritative qualified Nautilus ID and IB `conId` before attempting quote
+  subscription. A market-data routing error can no longer erase a successful qualification and
+  later surface misleadingly as `IB contract qualification timed out`.
+
+### Validation
+
+- Added regressions proving listing-venue instruments subscribe with `client_id=IB` and that a
+  qualified mapping survives a quote-subscription exception.
+- Full suite: 94 passed.
+
 ## 0.4.0a15 - 2026-09-24
 
 ### Fixed
