@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "conductor-trading"
-version = "0.4.0a11"
+version = "0.4.0a12"
 description = "Portfolio control plane and strategy runtime for multi-strategy trading"
 readme = "README.md"
 requires-python = ">=3.12"

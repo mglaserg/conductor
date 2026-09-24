@@ -52,8 +52,9 @@ cutover checklist in `docs/WINDOWS_ETSA_RPS_TLAQ_MIGRATION.md` are satisfied.
   instruments enter the provider `load_ids` before startup reconciliation and broker-reported marks
   are already available in the bridge for ownership bootstrap;
 - startup readiness gated on broker-position reconstruction rather than merely on a live heartbeat;
-- batch target-universe warm-up plus deduplicated instrument requests/quote subscriptions, avoiding
-  serial cold-cache resolution and duplicate subscription storms;
+- batch target-universe warm-up API with **serialized** cold IBKR contract resolution, so only one
+  missing symbol is in-flight at a time while instrument-request and quote-subscription dedupe stays
+  active; each cold symbol gets its own bridge timeout and exact-symbol diagnostics;
 - configured-vs-worker-reported IBKR account-ID validation that fails closed;
 - one-shot strategy subprocess orchestration with persisted run inputs and outputs;
 - native `target_weights`, `target_quantities`, and `position_deltas` result modes;
@@ -125,11 +126,11 @@ Never summarize the current state as production-ready.
    native account code. IB returns error 321. Keep `live_orders_enabled = false` until that fill
    reconciliation path is fixed or Conductor moves to a verified patched Nautilus build.
 2. Both physical IBKR routes still need clean worker smokes proving the new startup position
-   preflight/reconciliation gate, batch instrument warm-up, marks, restart recovery and stale-worker
-   blocking on Windows. The previous `ibkr_main` log proved that cold-cache reconciliation could
-   skip 34 broker positions and that serial instrument resolution could exceed the old 60 second
-   bridge timeout; a8 addressed both failure modes; a9 additionally fixes the native-vs-canonical symbol identity
-   mismatch exposed by the first live TWS startup check. Fresh live TWS validation is still required.
+   preflight/reconciliation gate, serialized target-universe warm-up, marks, restart recovery and
+   stale-worker blocking on Windows. Live shadow validation proved that the a8 batch fan-out of
+   multiple cold IB contract-detail requests could stall when ETSA introduced eight new symbols at
+   once; a12 keeps the batch API but serializes those missing-symbol resolves with per-symbol
+   diagnostics. Fresh Windows validation of ETSA/RPS after a12 is still required.
 3. Initial virtual positions and cash require human approval against the correct physical account.
 4. `max_margin_utilization` is represented in configuration/status but is **not yet enforced**;
    current worker state does not publish the required margin-utilization measurement.

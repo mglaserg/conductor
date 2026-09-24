@@ -57,8 +57,8 @@ Windows equity strategies without rewriting their strategy logic.
 - persistent Nautilus IBKR worker boundary with heartbeat, broker state, instrument resolution,
   request recovery, orders, fills, and commissions;
 - exact-account broker-position preflight feeding startup `load_ids`, canonical native-IB-to-Conductor
-  stock identity normalization, readiness gated on successful position reconstruction, and
-  batch/deduplicated target-universe warm-up for cold instrument caches;
+  stock identity normalization, readiness gated on successful position reconstruction, and a batch
+  target-universe API that serializes cold IB contract resolution with request/subscription dedupe;
 - explicit shadow mode with live submission disabled by default;
 - initial US-equity canonical mapping to IBKR SMART instruments;
 - strategy activate, disable, retire, status, doctor, worker-status, and dry-run-first route
@@ -77,8 +77,8 @@ Windows equity strategies without rewriting their strategy logic.
 3. Run the create-only route bootstrap workflow, review any shared-account ambiguity, and approve each strategy's initial virtual positions/cash against allocator-derived capital and broker NAV.
 4. Account for every physical IBKR position on the correct route/account and make `conductor doctor` clean across all configured routes.
 5. Prove both workers' heartbeat, account-ID match, per-account NAV publication, automatic broker
-   position preflight/startup reconstruction, batch target-universe warm-up, price availability, and
-   restart recovery against IBKR paper.
+   position preflight/startup reconstruction, serialized target-universe warm-up, price availability,
+   and restart recovery against IBKR paper.
 6. Prove a small paper order end to end, including fill quantity, average price, commission,
    reconciliation, and an empty second cycle.
 7. Close any gaps exposed by the required failure drills, including proving that an unrelated route

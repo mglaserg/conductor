@@ -253,7 +253,7 @@ def test_bridge_rejects_worker_connected_to_wrong_account(tmp_path):
         adapter.positions()
 
 
-def test_batch_warm_resolves_many_instruments_with_one_bridge_request(tmp_path):
+def test_batch_warm_serializes_dynamic_instrument_resolution(tmp_path):
     path = tmp_path / "bridge.sqlite"
     store = NautilusBridgeStore(path)
     _ready(store)
@@ -264,37 +264,75 @@ def test_batch_warm_resolves_many_instruments_with_one_bridge_request(tmp_path):
         request_timeout_seconds=2,
     )
 
+    observed: list[str] = []
+
     def worker() -> None:
         deadline = time.monotonic() + 2
-        while time.monotonic() < deadline:
+        prices = {"AAPL": "225.50", "TLT": "90.25"}
+        while time.monotonic() < deadline and len(observed) < 2:
             requests = store.claim_pending("ibkr")
-            if requests:
-                assert len(requests) == 1
-                req = requests[0]
-                assert req["kind"] == "warm_instruments"
-                assert req["payload"]["instruments"] == ["AAPL", "TLT"]
-                for symbol, price in (("AAPL", "225.50"), ("TLT", "90.25")):
-                    store.upsert_instrument(
-                        "ibkr",
-                        symbol,
-                        nautilus_instrument_id=f"{symbol}=STK.SMART",
-                        price=Decimal(price),
-                        asset_class="equity",
-                        venue="SMART",
-                    )
-                store.complete(req["request_id"], {"count": 2})
-                return
-            time.sleep(0.01)
-        raise AssertionError("no warm request")
+            if not requests:
+                time.sleep(0.01)
+                continue
+            assert len(requests) == 1
+            req = requests[0]
+            assert req["kind"] == "resolve_instrument"
+            symbol = req["payload"]["instrument"]
+            observed.append(symbol)
+            store.upsert_instrument(
+                "ibkr",
+                symbol,
+                nautilus_instrument_id=f"{symbol}=STK.SMART",
+                price=Decimal(prices[symbol]),
+                asset_class="equity",
+                venue="SMART",
+            )
+            store.complete(
+                req["request_id"],
+                {
+                    "instrument": symbol,
+                    "nautilus_instrument_id": f"{symbol}=STK.SMART",
+                    "price": prices[symbol],
+                },
+            )
+        if len(observed) != 2:
+            raise AssertionError(f"expected two serialized resolves, got {observed!r}")
 
     thread = threading.Thread(target=worker)
     thread.start()
     adapter.warm_instruments(["TLT", "AAPL", "AAPL"])
     thread.join(timeout=2)
 
+    assert observed == ["AAPL", "TLT"]
     with store._connect() as conn:
-        rows = conn.execute("SELECT kind FROM requests").fetchall()
-    assert [row["kind"] for row in rows] == ["warm_instruments"]
+        rows = conn.execute("SELECT kind FROM requests ORDER BY created_at, request_id").fetchall()
+    assert [row["kind"] for row in rows] == ["resolve_instrument", "resolve_instrument"]
+
+
+def test_batch_warm_reports_the_exact_symbol_that_times_out(tmp_path):
+    path = tmp_path / "bridge.sqlite"
+    store = NautilusBridgeStore(path)
+    _ready(store)
+    adapter = NautilusBridgeExecutionAdapter(
+        bridge_db=path,
+        route_id="ibkr",
+        live_orders_enabled=False,
+        request_timeout_seconds=0.05,
+    )
+
+    with pytest.raises(
+        NautilusBridgeError,
+        match=r"instrument warm-up failed for EQ\.US\.BUSE: timed out waiting for Nautilus request",
+    ):
+        adapter.warm_instruments(["EQ.US.BUSE", "EQ.US.XEL"])
+
+    with store._connect() as conn:
+        rows = conn.execute(
+            "SELECT kind, payload_json FROM requests ORDER BY created_at, request_id"
+        ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "resolve_instrument"
+    assert '"EQ.US.BUSE"' in rows[0]["payload_json"]
 
 
 

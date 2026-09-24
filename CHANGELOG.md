@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.0a12 - 2026-09-24
+
+### Fixed
+
+- Kept the public route-level target-universe warm-up API, but changed cold IBKR/Nautilus
+  instrument discovery from one fan-out bridge request into strictly serialized single-instrument
+  resolution. The next missing symbol is not enqueued until the previous one has a usable mark.
+- Each cold symbol now receives the full configured bridge request timeout independently. A stalled
+  contract therefore fails with the exact canonical instrument (for example `EQ.US.BUSE`) instead
+  of one opaque batch request ID after the whole universe hangs.
+- Existing startup-seeded marks still bypass dynamic resolution entirely, and quote-subscription /
+  in-flight request deduplication remains unchanged.
+
+### Validation
+
+- Added regressions proving that the second cold symbol is not enqueued before the first completes,
+  and that a stalled first symbol is named in the error while later symbols are never started.
+- This directly covers the Windows shadow failure where eight new ETSA symbols were fanned out
+  together and the Nautilus worker stopped making progress until Conductor's bridge timeout.
+
 ## 0.4.0a11 - 2026-09-24
 
 ### Fixed

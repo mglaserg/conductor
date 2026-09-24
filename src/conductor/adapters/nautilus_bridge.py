@@ -395,29 +395,25 @@ class NautilusBridgeExecutionAdapter:
         raise NautilusBridgeError(f"timed out waiting for Nautilus request {request_id}")
 
     def warm_instruments(self, instruments: Sequence[str]) -> None:
+        """Warm a route universe while keeping IB contract resolution strictly serialized.
+
+        The public API remains batch-oriented, but each missing instrument is resolved through the
+        proven single-instrument bridge request and awaited before the next is enqueued. Interactive
+        Brokers/Nautilus can stall when many cold contract-detail requests are fanned out at once;
+        serializing here also gives every symbol its own request timeout and produces a useful
+        per-symbol error instead of one opaque batch timeout.
+        """
         self._require_worker()
-        needed: list[str] = []
-        for value in sorted({str(instrument) for instrument in instruments}):
-            row = self.store.instrument(self.route_id, value)
-            if row is None or row.get("price") is None:
-                needed.append(value)
-        if not needed:
-            return
-        request_id = self.store.enqueue(
-            self.route_id,
-            "warm_instruments",
-            {"instruments": needed},
-        )
-        self._wait(request_id)
-        unresolved: list[str] = []
-        for instrument in needed:
+        for instrument in sorted({str(value) for value in instruments}):
             row = self.store.instrument(self.route_id, instrument)
-            if row is None or row.get("price") is None:
-                unresolved.append(instrument)
-        if unresolved:
-            raise NautilusBridgeError(
-                "worker warm-up completed without usable marks for: " + ", ".join(unresolved)
-            )
+            if row is not None and row.get("price") is not None:
+                continue
+            try:
+                self.instrument_spec(instrument)
+            except NautilusBridgeError as exc:
+                raise NautilusBridgeError(
+                    f"instrument warm-up failed for {instrument}: {exc}"
+                ) from exc
 
     def instrument_spec(self, instrument: str) -> InstrumentSpec:
         self._require_worker()
