@@ -378,11 +378,15 @@ It never uses venue-wide equity as a live fallback across accounts.
 `worker-status` also verifies that the worker-reported IBKR account matches the account configured
 for that route. It must show `ready: true` **and** a non-null `net_liquidation` before `doctor` or a
 live/shadow strategy run. During IBKR startup the worker stays not-ready until account state, NAV, and the broker-position
-preflight/reconciliation gate have completed. Before each portfolio cycle Conductor also warms the
-route's complete target universe in one worker request; the worker deduplicates instrument requests
-and quote subscriptions while waiting for usable marks.
+preflight/reconciliation gate have completed. Before each portfolio cycle Conductor warms the
+route's complete target universe through the bridge API; cold symbols are resolved serially so only
+one IB contract qualification is in flight at a time, with request/subscription dedupe throughout.
 
-Cold US-equity discovery uses IB contract dictionaries through Nautilus's IB instrument provider; a cold symbol fails fast if contract qualification does not complete, and successful qualifications remain eligible for the configured provider cache.
+Cold US-equity discovery uses IB contract dictionaries through Nautilus's IB instrument provider.
+The returned instrument identity is authoritative: a SMART-routed query may resolve to a primary
+listing venue such as `AUB=STK.NYSE`, which Conductor persists behind `EQ.US.AUB`. A cold symbol
+fails fast if qualification does not complete, and successful mappings remain eligible for the
+configured provider cache and survive worker restart.
 
 > **Current Nautilus rc4/rc5 IB limitation:** startup historical-fill reconciliation sends the
 > namespaced Nautilus account ID back to IB, which IB rejects with error 321. This is an upstream

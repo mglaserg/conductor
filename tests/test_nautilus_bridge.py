@@ -446,6 +446,34 @@ max_instrument_nav = 0.5
     assert canonical_us_equity_id("EQ.US.AEP") == "EQ.US.AEP"
 
 
+def test_startup_seed_preserves_previously_qualified_listing_venue(tmp_path):
+    from conductor.adapters.nautilus_bridge import NautilusBridgeStore
+    from conductor.adapters.nautilus_ibkr_worker import _seed_startup_positions
+
+    store = NautilusBridgeStore(tmp_path / "bridge.sqlite")
+    store.upsert_instrument(
+        "ibkr_main",
+        "EQ.US.AUB",
+        nautilus_instrument_id="AUB=STK.NYSE",
+        price="50",
+        asset_class="equity",
+        venue="NYSE",
+        broker_id="123456",
+    )
+
+    _seed_startup_positions(
+        store,
+        "ibkr_main",
+        {"AUB": Decimal("10")},
+        prices={"AUB": Decimal("51")},
+    )
+
+    row = store.instrument("ibkr_main", "EQ.US.AUB")
+    assert row["nautilus_instrument_id"] == "AUB=STK.NYSE"
+    assert row["venue"] == "NYSE"
+    assert row["price"] == "51"
+
+
 def test_cold_stock_resolution_uses_ib_contract_qualification(monkeypatch):
     from types import SimpleNamespace
 
@@ -462,41 +490,91 @@ def test_cold_stock_resolution_uses_ib_contract_qualification(monkeypatch):
         "currency": "USD",
     }
 
-    class FakeVenue:
+    class FakeClientId:
         @staticmethod
         def from_str(value):
-            return f"VENUE:{value}"
+            return f"CLIENT:{value}"
 
-    monkeypatch.setattr(worker_module, "_import_nautilus", lambda: {"Venue": FakeVenue})
+    monkeypatch.setattr(worker_module, "_import_nautilus", lambda: {"ClientId": FakeClientId})
 
     calls = []
     fake = SimpleNamespace(
-        cache=SimpleNamespace(instrument=lambda _instrument_id: None),
         _instrument_requests_inflight=set(),
         request_instruments=lambda **kwargs: calls.append(kwargs),
     )
-    fake._instrument_key = _BridgeStrategyMixin._instrument_key.__get__(fake)
 
-    instrument_id = "AUB=STK.SMART"
-    _BridgeStrategyMixin._ensure_instrument_request(fake, "EQ.US.AUB", instrument_id)
-    _BridgeStrategyMixin._ensure_instrument_request(fake, "EQ.US.AUB", instrument_id)
+    _BridgeStrategyMixin._ensure_instrument_request(fake, "EQ.US.AUB")
+    _BridgeStrategyMixin._ensure_instrument_request(fake, "EQ.US.AUB")
 
     assert calls == [
         {
-            "venue": "VENUE:IB",
+            "client_id": "CLIENT:IB",
             "params": {
-                "ib_contracts": (
+                "ib_contracts": [
                     {
                         "symbol": "AUB",
                         "secType": "STK",
                         "exchange": "SMART",
                         "currency": "USD",
                     },
-                )
+                ]
             },
         }
     ]
-    assert instrument_id in fake._instrument_requests_inflight
+    assert fake._instrument_requests_inflight == {"EQ.US.AUB"}
+
+
+def test_qualified_stock_response_binds_returned_listing_venue(monkeypatch):
+    from types import SimpleNamespace
+
+    import conductor.adapters.nautilus_ibkr_worker as worker_module
+    from conductor.adapters.nautilus_ibkr_worker import _BridgeStrategyMixin
+
+    class FakeId:
+        def __init__(self, value: str, venue: str):
+            self.value = value
+            self.venue = venue
+            self.symbol = value.split(".", 1)[0]
+
+        def __str__(self):
+            return self.value
+
+    instrument_id = FakeId("AUB=STK.NYSE", "NYSE")
+    instrument = SimpleNamespace(
+        id=instrument_id,
+        raw_symbol="AUB",
+        multiplier=1,
+        size_increment=1,
+        info={"contract": {"conId": 123456}},
+    )
+
+    upserts = []
+    store = SimpleNamespace(
+        upsert_instrument=lambda *args, **kwargs: upserts.append((args, kwargs)),
+        fail=lambda *_args, **_kwargs: None,
+    )
+    fake = SimpleNamespace(
+        _bridge_store=store,
+        _bridge_route_id="ibkr_main",
+        _pending_resolves={"REQ1": ("EQ.US.AUB", None, 999.0)},
+        _pending_warms={},
+        _instrument_requests_inflight={"EQ.US.AUB"},
+        _ensure_quote_subscription=lambda value: setattr(fake, "subscribed", value),
+        _refresh_pending_resolves=lambda: None,
+        _refresh_pending_warms=lambda: None,
+        log=SimpleNamespace(info=lambda *_args, **_kwargs: None),
+        subscribed=None,
+    )
+
+    _BridgeStrategyMixin.on_instruments(fake, [instrument])
+
+    assert fake._pending_resolves["REQ1"][1] is instrument_id
+    assert fake._instrument_requests_inflight == set()
+    assert fake.subscribed is instrument_id
+    assert upserts[0][0][:2] == ("ibkr_main", "EQ.US.AUB")
+    assert upserts[0][1]["nautilus_instrument_id"] == "AUB=STK.NYSE"
+    assert upserts[0][1]["venue"] == "NYSE"
+    assert upserts[0][1]["broker_id"] == "123456"
 
 
 def test_expired_cold_stock_resolution_fails_and_clears_inflight(monkeypatch):
@@ -517,8 +595,8 @@ def test_expired_cold_stock_resolution_fails_and_clears_inflight(monkeypatch):
     fake = SimpleNamespace(
         cache=SimpleNamespace(instrument=lambda _instrument_id: None),
         _bridge_store=store,
-        _pending_resolves={"REQ1": ("EQ.US.AUB", "AUB=STK.SMART", 99.0)},
-        _instrument_requests_inflight={"AUB=STK.SMART"},
+        _pending_resolves={"REQ1": ("EQ.US.AUB", None, 99.0)},
+        _instrument_requests_inflight={"EQ.US.AUB"},
     )
     fake._instrument_key = _BridgeStrategyMixin._instrument_key.__get__(fake)
 

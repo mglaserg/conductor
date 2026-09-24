@@ -7,7 +7,7 @@ where the product is going; this file describes what is true now and what should
 
 ## Current objective
 
-Cold US-equity targets now use IB contract dictionaries for qualification instead of relying on naked RAW symbol parsing; failed qualification is short-lived and retryable.
+Cold US-equity targets now use IB contract dictionaries for qualification and bind Conductor canonical IDs to the authoritative instrument IDs returned by Nautilus/IB (including primary/listing venues); failed qualification is short-lived and retryable.
 
 
 Promote the V0.4 Windows migration runtime from locally implemented alpha code to an operationally
@@ -57,7 +57,8 @@ cutover checklist in `docs/WINDOWS_ETSA_RPS_TLAQ_MIGRATION.md` are satisfied.
 - startup readiness gated on broker-position reconstruction rather than merely on a live heartbeat;
 - batch target-universe warm-up API with **serialized** cold IBKR contract qualification, so only one
   missing symbol is in-flight at a time while instrument-request and quote-subscription dedupe stays
-  active; each cold symbol gets its own bridge timeout and exact-symbol diagnostics;
+  active; the worker binds the returned listing-venue Nautilus ID to Conductor's canonical ID, and
+  each cold symbol gets its own bridge timeout and exact-symbol diagnostics;
 - configured-vs-worker-reported IBKR account-ID validation that fails closed;
 - one-shot strategy subprocess orchestration with persisted run inputs and outputs;
 - native `target_weights`, `target_quantities`, and `position_deltas` result modes;
@@ -84,7 +85,7 @@ paper, shadow, or production validation.
 
 ## Verification state
 
-- Full automated suite on 2026-09-24: **80 passed**.
+- Full automated suite on 2026-09-24: **92 passed**.
 - New multi-account coverage verifies:
   - independent broker NAVs and 85/15 + 100% strategy budgeting;
   - exact strategy membership/weight validation per route;
@@ -132,8 +133,9 @@ Never summarize the current state as production-ready.
    preflight/reconciliation gate, serialized target-universe warm-up, marks, restart recovery and
    stale-worker blocking on Windows. Live shadow validation proved that the a8 batch fan-out of
    multiple cold IB contract-detail requests could stall when ETSA introduced eight new symbols at
-   once; a12 keeps the batch API but serializes those missing-symbol resolves with per-symbol
-   diagnostics. Fresh Windows validation of ETSA/RPS after a12 is still required.
+   once; a12 serialized those resolves, and a14 now binds the actual instrument identity returned by
+   IB/Nautilus instead of assuming the discovery venue remains SMART. Fresh Windows validation of
+   ETSA/RPS after a14 is still required.
 3. Initial virtual positions and cash require human approval against the correct physical account.
 4. `max_margin_utilization` is represented in configuration/status but is **not yet enforced**;
    current worker state does not publish the required margin-utilization measurement.

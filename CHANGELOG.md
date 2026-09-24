@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.0a14 - 2026-09-24
+
+### Fixed
+
+- Corrected cold IB stock qualification to bind Conductor's canonical ID to the **instrument ID
+  returned by Nautilus/IB**, rather than waiting for the original `=STK.SMART` discovery guess to
+  appear in cache. Stocks may resolve to their primary/listing venue (for example
+  `EQ.US.AUB -> AUB=STK.NYSE`) while SMART remains the routing exchange.
+- Routed `request_instruments(..., ib_contracts=...)` explicitly to Nautilus client `IB`, matching
+  Nautilus' v2 IB example, and passed the contract payload as a JSON array.
+- Added `on_instruments` handling for the IB batch response, exact native-symbol matching,
+  fail-closed ambiguity detection, returned-venue quote subscription, and nested IB `conId`
+  extraction from `instrument.info["contract"]`.
+- Preserved previously qualified listing-venue mappings during startup position seeding/preload so
+  a worker restart cannot silently rewrite a known `NYSE`/`NASDAQ` identity back to SMART.
+
+### Validation
+
+- Added regressions for returned listing-venue binding (`AUB=STK.NYSE`), nested `conId` capture,
+  request routing/payload shape, qualification timeout cleanup, and restart persistence.
+- Full suite: 92 passed.
+
 ## 0.4.0a13 - 2026-09-24
 
 ### Fixed

@@ -58,7 +58,8 @@ Windows equity strategies without rewriting their strategy logic.
   request recovery, orders, fills, and commissions;
 - exact-account broker-position preflight feeding startup `load_ids`, canonical native-IB-to-Conductor
   stock identity normalization, readiness gated on successful position reconstruction, and a batch
-  target-universe API that serializes cold IB contract resolution with request/subscription dedupe;
+  target-universe API that serializes cold IB contract resolution with request/subscription dedupe
+  and persists the authoritative listing-venue instrument ID returned by IB/Nautilus;
 - explicit shadow mode with live submission disabled by default;
 - initial US-equity canonical mapping to IBKR SMART instruments;
 - strategy activate, disable, retire, status, doctor, worker-status, and dry-run-first route

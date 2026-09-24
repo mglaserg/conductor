@@ -261,12 +261,12 @@ def test_worker_instrument_request_is_deduplicated_while_pending(monkeypatch) ->
         def instrument(self, _instrument_id):
             return None
 
-    class Venue:
+    class ClientId:
         @staticmethod
         def from_str(value):
             return value
 
-    monkeypatch.setattr(worker_module, "_import_nautilus", lambda: {"Venue": Venue})
+    monkeypatch.setattr(worker_module, "_import_nautilus", lambda: {"ClientId": ClientId})
 
     worker = object.__new__(_BridgeStrategyMixin)
     worker.cache = Cache()
@@ -274,21 +274,21 @@ def test_worker_instrument_request_is_deduplicated_while_pending(monkeypatch) ->
     calls: list[dict] = []
     worker.request_instruments = lambda **kwargs: calls.append(kwargs)
 
-    worker._ensure_instrument_request("EQ.US.TLT", "TLT=STK.SMART")
-    worker._ensure_instrument_request("EQ.US.TLT", "TLT=STK.SMART")
+    worker._ensure_instrument_request("EQ.US.TLT")
+    worker._ensure_instrument_request("EQ.US.TLT")
 
     assert calls == [
         {
-            "venue": "IB",
+            "client_id": "IB",
             "params": {
-                "ib_contracts": (
+                "ib_contracts": [
                     {
                         "symbol": "TLT",
                         "secType": "STK",
                         "exchange": "SMART",
                         "currency": "USD",
                     },
-                )
+                ]
             },
         }
     ]
