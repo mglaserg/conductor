@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.0a10 - 2026-09-24
+
+### Added
+
+- Added `conductor bootstrap <route_id>` as a first-class, dry-run-by-default ownership bootstrap
+  workflow for live/shadow broker routes.
+- Single-strategy routes automatically propose ownership of every current broker position. Shared
+  routes infer only unambiguous ownership claims from each strategy's latest persisted runtime
+  intent; unclaimed or multiply-claimed instruments remain unresolved and block commit.
+- Added explicit JSON ownership manifests and `--write-template` support for resolving shared-route
+  ambiguities without editing SQLite by hand.
+- Bootstrap cash is derived from each strategy's allocator-assigned capital minus the marked net
+  notional of its approved starting positions, so each virtual book starts with equity equal to its
+  assigned capital.
+
+### Safety
+
+- Bootstrap is create-only: it refuses to overwrite any route that already has virtual ownership.
+- `--commit` requires `--confirm <route_id>`, and the proposed strategy quantities must sum exactly
+  to every live broker quantity before the ledger can be written.
+- The position and cash writes are one SQLite transaction, followed by immediate broker-vs-virtual
+  reconciliation. Bootstrap never places orders and never interprets allocator weights as position
+  ownership.
+
 ## 0.4.0a9 - 2026-09-24
 
 ### Fixed

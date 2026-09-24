@@ -10,7 +10,13 @@ from conductor.adapters.paper import DurablePaperExecutionAdapter, PaperExecutio
 from conductor.adapters.router import RoutedExecutionAdapter
 from conductor.allocation import AllocationDecision, FallbackAllocator
 from conductor.config import PortfolioConfig, RuntimeConfig, load_runtime_config
-from conductor.domain.models import ZERO, AggregateTarget, BrokerPosition, InstrumentSpec
+from conductor.domain.models import (
+    ZERO,
+    AggregateTarget,
+    BrokerPosition,
+    InstrumentSpec,
+    VirtualTarget,
+)
 from conductor.engine import ConductorEngine
 from conductor.ledger import ConductorLedger
 from conductor.orders import OrderPlanner
@@ -453,6 +459,233 @@ class ConductorRuntimeApp:
                 for position in self.engine.execution.positions()
             ]
         return payload
+
+    def bootstrap_route_ownership(
+        self,
+        route_id: str,
+        *,
+        ownership: dict[str, dict[str, Decimal]] | None = None,
+        commit: bool = False,
+    ) -> dict:
+        """Plan or commit initial virtual ownership for one live broker route.
+
+        A single-strategy route owns every broker position automatically. Shared routes infer only
+        unambiguous ownership from each strategy's latest persisted intent. Any unclaimed or
+        multiply-claimed instrument remains unresolved until the operator supplies an explicit
+        ownership manifest.
+        """
+        if self.paper_mode:
+            raise ValueError("bootstrap is for live/shadow broker routes, not paper mode")
+        if route_id not in self.route_scope:
+            raise ValueError(f"bootstrap route {route_id} is outside runtime scope")
+        if route_id not in self.route_adapters:
+            raise ValueError(f"bootstrap route {route_id} has no execution adapter")
+
+        profiles = {
+            strategy_id: profile
+            for strategy_id, profile in self.config.strategies.items()
+            if profile.route_id == route_id
+        }
+        if not profiles:
+            raise ValueError(f"route {route_id} has no configured strategies")
+
+        existing = [
+            row for row in self.ledger.virtual_positions() if row["route_id"] == route_id
+        ]
+        if existing:
+            raise RuntimeError(
+                f"route {route_id} already has {len(existing)} virtual positions; bootstrap is "
+                "create-only and will not replace existing ownership"
+            )
+
+        broker_quantities: dict[str, Decimal] = defaultdict(lambda: ZERO)
+        for position in self.route_adapters[route_id].positions():  # type: ignore[attr-defined]
+            if position.route_id == route_id:
+                broker_quantities[position.instrument] += position.quantity
+        broker_quantities = {
+            instrument: quantity
+            for instrument, quantity in broker_quantities.items()
+            if quantity != ZERO
+        }
+
+        assigned: dict[str, dict[str, Decimal]] = {strategy_id: {} for strategy_id in profiles}
+        unresolved: list[dict[str, object]] = []
+        inference = "explicit_manifest" if ownership is not None else "runtime_intents"
+
+        if ownership is not None:
+            unknown_strategies = set(ownership) - set(profiles)
+            if unknown_strategies:
+                raise ValueError(
+                    "ownership manifest references strategies outside route "
+                    f"{route_id}: {', '.join(sorted(unknown_strategies))}"
+                )
+            for strategy_id, positions in ownership.items():
+                for instrument, quantity in positions.items():
+                    quantity = Decimal(str(quantity))
+                    if quantity != ZERO:
+                        assigned[strategy_id][instrument] = quantity
+        elif len(profiles) == 1:
+            inference = "single_owner_route"
+            strategy_id = next(iter(profiles))
+            assigned[strategy_id] = dict(sorted(broker_quantities.items()))
+        else:
+            latest = {
+                intent.strategy_id: intent
+                for intent in self.ledger.runtime_intents()
+                if intent.route_id == route_id and intent.strategy_id in profiles
+            }
+            missing_intents = sorted(set(profiles) - set(latest))
+            if missing_intents:
+                unresolved.append(
+                    {
+                        "reason": "missing_runtime_intent",
+                        "strategies": missing_intents,
+                    }
+                )
+
+            for instrument, quantity in sorted(broker_quantities.items()):
+                claimants = [
+                    strategy_id
+                    for strategy_id, intent in sorted(latest.items())
+                    if intent.targets.get(instrument, ZERO) != ZERO
+                ]
+                if len(claimants) == 1:
+                    assigned[claimants[0]][instrument] = quantity
+                else:
+                    unresolved.append(
+                        {
+                            "reason": "unclaimed" if not claimants else "ambiguous",
+                            "instrument": instrument,
+                            "broker_quantity": str(quantity),
+                            "claimants": claimants,
+                            "source_targets": {
+                                strategy_id: str(latest[strategy_id].targets[instrument])
+                                for strategy_id in claimants
+                            },
+                        }
+                    )
+
+        assigned_totals: dict[str, Decimal] = defaultdict(lambda: ZERO)
+        for positions in assigned.values():
+            for instrument, quantity in positions.items():
+                assigned_totals[instrument] += quantity
+        manifest_differences = []
+        for instrument in sorted(set(broker_quantities) | set(assigned_totals)):
+            broker_quantity = broker_quantities.get(instrument, ZERO)
+            assigned_quantity = assigned_totals.get(instrument, ZERO)
+            if broker_quantity != assigned_quantity:
+                manifest_differences.append(
+                    {
+                        "instrument": instrument,
+                        "broker_quantity": str(broker_quantity),
+                        "assigned_quantity": str(assigned_quantity),
+                        "difference": str(broker_quantity - assigned_quantity),
+                    }
+                )
+
+        committable = not unresolved and not manifest_differences
+        cash_by_owner: dict[tuple[str, str], Decimal] = {}
+        position_rows: list[VirtualTarget] = []
+        strategy_details: dict[str, dict[str, object]] = {}
+
+        if committable:
+            adapter = self.route_adapters[route_id]
+            warm = getattr(adapter, "warm_instruments", None)
+            if callable(warm) and broker_quantities:
+                warm(sorted(broker_quantities))
+
+            specs: dict[str, InstrumentSpec] = {}
+            provider = getattr(adapter, "instrument_spec", None)
+            if not callable(provider):
+                raise ValueError(f"route {route_id} cannot provide instrument marks for bootstrap")
+            for instrument in sorted(broker_quantities):
+                spec = provider(instrument)
+                specs[instrument] = spec
+                self.portfolio.instruments[instrument] = spec
+
+            for strategy_id, profile in sorted(profiles.items()):
+                account = self.ledger.strategy_account(strategy_id, book_id=profile.book_id)
+                if account is None:
+                    raise KeyError(f"strategy account not seeded: {strategy_id}/{profile.book_id}")
+                allocated_capital = Decimal(account["allocated_capital"])
+                net_notional = ZERO
+                for instrument, quantity in sorted(assigned[strategy_id].items()):
+                    notional = quantity * specs[instrument].unit_notional
+                    net_notional += notional
+                    position_rows.append(
+                        VirtualTarget(
+                            strategy_id=strategy_id,
+                            book_id=profile.book_id,
+                            sleeve_id=profile.sleeve_id,
+                            route_id=route_id,
+                            instrument=instrument,
+                            target=quantity,
+                            notional=notional,
+                        )
+                    )
+                cash = allocated_capital - net_notional
+                cash_by_owner[(strategy_id, profile.book_id)] = cash
+                strategy_details[strategy_id] = {
+                    "book_id": profile.book_id,
+                    "allocated_capital": str(allocated_capital),
+                    "position_count": len(assigned[strategy_id]),
+                    "net_position_notional": str(net_notional),
+                    "bootstrap_cash": str(cash),
+                    "positions": {
+                        instrument: str(quantity)
+                        for instrument, quantity in sorted(assigned[strategy_id].items())
+                    },
+                }
+
+        result: dict[str, object] = {
+            "route_id": route_id,
+            "mode": "commit" if commit else "dry_run",
+            "inference": inference,
+            "broker_position_count": len(broker_quantities),
+            "strategies": strategy_details,
+            "ownership": {
+                strategy_id: {
+                    instrument: str(quantity)
+                    for instrument, quantity in sorted(positions.items())
+                }
+                for strategy_id, positions in sorted(assigned.items())
+            },
+            "unresolved": unresolved,
+            "manifest_differences": manifest_differences,
+            "committable": committable,
+            "committed": False,
+        }
+
+        if commit:
+            if not committable:
+                raise ValueError(
+                    f"bootstrap plan for {route_id} is not committable; resolve every ownership "
+                    "ambiguity and quantity difference first"
+                )
+            self.ledger.bootstrap_route_ownership(
+                route_id=route_id,
+                positions=position_rows,
+                cash_by_owner=cash_by_owner,
+            )
+            reconciliation = self.bootstrap_reconciliation()
+            if not reconciliation["reconciled"]:
+                raise RuntimeError(
+                    f"bootstrap commit for {route_id} did not reconcile to broker positions"
+                )
+            result["committed"] = True
+            result["reconciliation"] = reconciliation
+            self.ledger.append_event(
+                "bootstrap.route_completed",
+                {
+                    "route_id": route_id,
+                    "inference": inference,
+                    "broker_position_count": len(broker_quantities),
+                    "strategies": strategy_details,
+                },
+            )
+        else:
+            self.ledger.append_event("bootstrap.route_planned", result)
+        return result
 
     def bootstrap_reconciliation(self) -> dict:
         quantities: dict[tuple[str, str], Decimal] = defaultdict(lambda: ZERO)

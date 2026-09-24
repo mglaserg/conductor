@@ -13,6 +13,7 @@ from conductor.domain.models import (
     ExecutionReport,
     ExposureType,
     InstrumentSpec,
+    StrategyIntent,
     VirtualTarget,
 )
 from conductor.orders import OrderPlanner
@@ -370,3 +371,183 @@ command = ["python", "tlaq.py"]
     assert config.routes["ibkr_main"].account_summary_client_id == 11302
     assert config.routes["ibkr_tlaq"].account_summary_client_id == 2312
     assert config.routes["ibkr_tlaq"].account_summary_fallback_enabled is True
+
+
+def test_single_owner_route_bootstrap_is_exact_and_reconciles(tmp_path, monkeypatch) -> None:
+    config_path = _multi_account_config(tmp_path)
+    text = config_path.read_text(encoding="utf-8").replace(
+        "positions = { AAPL = 10 }", "positions = {}"
+    )
+    config_path.write_text(text, encoding="utf-8")
+
+    def fake_adapter(**kwargs):
+        assert kwargs["route_id"] == "ibkr_tlaq"
+        return _FakeLiveAdapter(
+            "ibkr_tlaq",
+            Decimal("100000"),
+            {"GLD": Decimal("150"), "TLT": Decimal("20")},
+        )
+
+    monkeypatch.setattr("conductor.runtime.app.NautilusBridgeExecutionAdapter", fake_adapter)
+    app = ConductorRuntimeApp.from_path(config_path, route_scope={"ibkr_tlaq"})
+    try:
+        plan = app.bootstrap_route_ownership("ibkr_tlaq")
+        assert plan["inference"] == "single_owner_route"
+        assert plan["committable"] is True
+        assert plan["ownership"] == {"TLAQ": {"GLD": "150", "TLT": "20"}}
+        assert plan["strategies"]["TLAQ"]["bootstrap_cash"] == "83000"
+
+        committed = app.bootstrap_route_ownership("ibkr_tlaq", commit=True)
+        assert committed["committed"] is True
+        assert committed["reconciliation"]["reconciled"] is True
+        assert app.ledger.strategy_positions("TLAQ") == {
+            "GLD": Decimal("150"),
+            "TLT": Decimal("20"),
+        }
+        assert Decimal(app.ledger.strategy_account("TLAQ")["cash"]) == Decimal("83000.0")
+
+        with pytest.raises(RuntimeError, match="already has 2 virtual positions"):
+            app.bootstrap_route_ownership("ibkr_tlaq")
+    finally:
+        app.close()
+
+
+def test_shared_route_bootstrap_infers_unique_ownership_from_latest_intents(
+    tmp_path, monkeypatch
+) -> None:
+    config_path = _multi_account_config(tmp_path)
+
+    def fake_adapter(**kwargs):
+        assert kwargs["route_id"] == "ibkr_main"
+        return _FakeLiveAdapter(
+            "ibkr_main",
+            Decimal("200000"),
+            {"AAPL": Decimal("10"), "MSFT": Decimal("20")},
+        )
+
+    monkeypatch.setattr("conductor.runtime.app.NautilusBridgeExecutionAdapter", fake_adapter)
+    app = ConductorRuntimeApp.from_path(config_path, route_scope={"ibkr_main"})
+    try:
+        app.ledger.replace_runtime_intent(
+            StrategyIntent(
+                strategy_id="ETSA",
+                sleeve_id="default",
+                route_id="ibkr_main",
+                revision=1,
+                targets={"AAPL": Decimal("0.25")},
+            ),
+            run_id="etsa-bootstrap-source",
+        )
+        app.ledger.replace_runtime_intent(
+            StrategyIntent(
+                strategy_id="RPSchteroids",
+                sleeve_id="default",
+                route_id="ibkr_main",
+                revision=1,
+                targets={"MSFT": Decimal("0.50")},
+            ),
+            run_id="rps-bootstrap-source",
+        )
+
+        plan = app.bootstrap_route_ownership("ibkr_main")
+        assert plan["committable"] is True
+        assert plan["ownership"] == {
+            "ETSA": {"AAPL": "10"},
+            "RPSchteroids": {"MSFT": "20"},
+        }
+
+        committed = app.bootstrap_route_ownership("ibkr_main", commit=True)
+        assert committed["reconciliation"]["reconciled"] is True
+        assert app.ledger.strategy_positions("ETSA") == {"AAPL": Decimal("10")}
+        assert app.ledger.strategy_positions("RPSchteroids") == {"MSFT": Decimal("20")}
+        assert Decimal(app.ledger.strategy_account("ETSA")["cash"]) == Decimal("169000.00")
+        assert Decimal(app.ledger.strategy_account("RPSchteroids")["cash"]) == Decimal("28000.00")
+    finally:
+        app.close()
+
+
+def test_shared_route_bootstrap_refuses_ambiguous_overlap_without_manifest(
+    tmp_path, monkeypatch
+) -> None:
+    config_path = _multi_account_config(tmp_path)
+
+    def fake_adapter(**kwargs):
+        assert kwargs["route_id"] == "ibkr_main"
+        return _FakeLiveAdapter(
+            "ibkr_main",
+            Decimal("200000"),
+            {"AAPL": Decimal("10")},
+        )
+
+    monkeypatch.setattr("conductor.runtime.app.NautilusBridgeExecutionAdapter", fake_adapter)
+    app = ConductorRuntimeApp.from_path(config_path, route_scope={"ibkr_main"})
+    try:
+        for strategy_id in ("ETSA", "RPSchteroids"):
+            app.ledger.replace_runtime_intent(
+                StrategyIntent(
+                    strategy_id=strategy_id,
+                    sleeve_id="default",
+                    route_id="ibkr_main",
+                    revision=1,
+                    targets={"AAPL": Decimal("0.25")},
+                ),
+                run_id=f"{strategy_id}-bootstrap-source",
+            )
+
+        plan = app.bootstrap_route_ownership("ibkr_main")
+        assert plan["committable"] is False
+        assert plan["unresolved"] == [
+            {
+                "reason": "ambiguous",
+                "instrument": "AAPL",
+                "broker_quantity": "10",
+                "claimants": ["ETSA", "RPSchteroids"],
+                "source_targets": {"ETSA": "0.25", "RPSchteroids": "0.25"},
+            }
+        ]
+        with pytest.raises(ValueError, match="not committable"):
+            app.bootstrap_route_ownership("ibkr_main", commit=True)
+
+        committed = app.bootstrap_route_ownership(
+            "ibkr_main",
+            ownership={
+                "ETSA": {"AAPL": Decimal("6")},
+                "RPSchteroids": {"AAPL": Decimal("4")},
+            },
+            commit=True,
+        )
+        assert committed["reconciliation"]["reconciled"] is True
+        assert app.ledger.strategy_positions("ETSA") == {"AAPL": Decimal("6")}
+        assert app.ledger.strategy_positions("RPSchteroids") == {"AAPL": Decimal("4")}
+    finally:
+        app.close()
+
+
+def test_bootstrap_manifest_must_sum_exactly_to_broker(tmp_path, monkeypatch) -> None:
+    config_path = _multi_account_config(tmp_path)
+
+    def fake_adapter(**kwargs):
+        return _FakeLiveAdapter(
+            "ibkr_main",
+            Decimal("200000"),
+            {"AAPL": Decimal("10")},
+        )
+
+    monkeypatch.setattr("conductor.runtime.app.NautilusBridgeExecutionAdapter", fake_adapter)
+    app = ConductorRuntimeApp.from_path(config_path, route_scope={"ibkr_main"})
+    try:
+        plan = app.bootstrap_route_ownership(
+            "ibkr_main",
+            ownership={"ETSA": {"AAPL": Decimal("9")}},
+        )
+        assert plan["committable"] is False
+        assert plan["manifest_differences"] == [
+            {
+                "instrument": "AAPL",
+                "broker_quantity": "10",
+                "assigned_quantity": "9",
+                "difference": "1",
+            }
+        ]
+    finally:
+        app.close()

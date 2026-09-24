@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -48,6 +49,32 @@ def main() -> None:
         "doctor", help="read-only bootstrap check: virtual ownership must equal broker positions"
     )
     doctor.add_argument("--config", default="conductor.toml", type=Path)
+
+    bootstrap = sub.add_parser(
+        "bootstrap",
+        help="plan or commit initial virtual ownership for one broker route",
+    )
+    bootstrap.add_argument("route_id")
+    bootstrap.add_argument("--config", default="conductor.toml", type=Path)
+    bootstrap.add_argument(
+        "--ownership",
+        type=Path,
+        help="optional JSON ownership manifest for a shared route",
+    )
+    bootstrap.add_argument(
+        "--write-template",
+        type=Path,
+        help="write the dry-run ownership plan/template to this JSON file",
+    )
+    bootstrap.add_argument(
+        "--commit",
+        action="store_true",
+        help="write the bootstrap plan to the virtual ownership ledger",
+    )
+    bootstrap.add_argument(
+        "--confirm",
+        help="required with --commit; must exactly match route_id",
+    )
 
     dashboard = sub.add_parser("dashboard", help="launch the read-only local Streamlit board")
     dashboard.add_argument("--config", default="conductor.toml", type=Path)
@@ -146,11 +173,16 @@ def main() -> None:
             )
         )
 
-    if args.command in {"run", "status", "doctor", "activate", "disable", "retire"}:
+    if args.command in {"run", "status", "doctor", "bootstrap", "activate", "disable", "retire"}:
         if args.command == "retire" and args.confirm != args.strategy_id:
             raise SystemExit(
                 "REFUSED: retirement can flatten positions; pass --confirm with the exact "
                 "strategy ID"
+            )
+        if args.command == "bootstrap" and args.commit and args.confirm != args.route_id:
+            raise SystemExit(
+                "REFUSED: bootstrap rewrites starting ownership; pass --confirm with the exact "
+                "route ID"
             )
         route_scope = None
         if args.command in {"run", "activate", "disable", "retire"}:
@@ -165,6 +197,13 @@ def main() -> None:
             if len(matches) != 1:
                 raise SystemExit(f"unknown configured strategy: {args.strategy_id}")
             route_scope = {config.strategies[matches[0]].route_id}
+        elif args.command == "bootstrap":
+            from conductor.config import load_runtime_config
+
+            config = load_runtime_config(args.config)
+            if args.route_id not in config.routes:
+                raise SystemExit(f"unknown route: {args.route_id}")
+            route_scope = {args.route_id}
 
         try:
             app = ConductorRuntimeApp.from_path(
@@ -218,6 +257,58 @@ def main() -> None:
                 result = app.bootstrap_reconciliation()
                 print(json.dumps(result, indent=2, sort_keys=True))
                 if not result["reconciled"]:
+                    raise SystemExit(3)
+                return
+            if args.command == "bootstrap":
+                ownership = None
+                if args.ownership is not None:
+                    try:
+                        payload = json.loads(args.ownership.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError) as exc:
+                        raise SystemExit(f"INVALID ownership manifest: {exc}") from exc
+                    if not isinstance(payload, dict):
+                        raise SystemExit("INVALID ownership manifest: root must be an object")
+                    manifest_route = payload.get("route_id")
+                    if manifest_route is not None and manifest_route != args.route_id:
+                        raise SystemExit(
+                            f"INVALID ownership manifest: route_id {manifest_route!r} does not "
+                            f"match {args.route_id!r}"
+                        )
+                    raw_positions = payload.get("positions", payload.get("ownership"))
+                    if not isinstance(raw_positions, dict):
+                        raise SystemExit(
+                            "INVALID ownership manifest: expected positions/ownership object"
+                        )
+                    ownership = {}
+                    try:
+                        for strategy_id, positions in raw_positions.items():
+                            if not isinstance(strategy_id, str) or not isinstance(positions, dict):
+                                raise ValueError("strategy ownership must be an object")
+                            ownership[strategy_id] = {
+                                str(instrument): Decimal(str(quantity))
+                                for instrument, quantity in positions.items()
+                            }
+                    except Exception as exc:
+                        raise SystemExit(f"INVALID ownership manifest: {exc}") from exc
+                try:
+                    result = app.bootstrap_route_ownership(
+                        args.route_id, ownership=ownership, commit=args.commit
+                    )
+                except (KeyError, RuntimeError, ValueError) as exc:
+                    raise SystemExit(f"REFUSED: {exc}") from exc
+                if args.write_template is not None:
+                    template = {
+                        "route_id": args.route_id,
+                        "positions": result["ownership"],
+                        "unresolved": result["unresolved"],
+                    }
+                    args.write_template.parent.mkdir(parents=True, exist_ok=True)
+                    args.write_template.write_text(
+                        json.dumps(template, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
+                print(json.dumps(result, indent=2, sort_keys=True))
+                if not result["committable"]:
                     raise SystemExit(3)
                 return
 

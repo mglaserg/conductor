@@ -269,6 +269,36 @@ non-stock contract during its preflight, it fails closed rather than silently sk
 Once Conductor has execution authority, manual trading in that account should be treated as an
 operational exception requiring explicit reconciliation.
 
+Initial ownership is established with a dry-run-first bootstrap command. A route with one configured
+strategy is mechanically assignable; a shared route uses the latest persisted strategy intents only
+to identify unique owners and refuses any unclaimed or overlapping instrument:
+
+```powershell
+uv run conductor bootstrap ibkr_tlaq --config conductor.toml
+uv run conductor bootstrap ibkr_tlaq --config conductor.toml --commit --confirm ibkr_tlaq
+
+uv run conductor bootstrap ibkr_main --config conductor.toml `
+  --write-template data/bootstrap/ibkr_main.json
+```
+
+If `ibkr_main` is fully unambiguous, commit it directly:
+
+```powershell
+uv run conductor bootstrap ibkr_main --config conductor.toml --commit --confirm ibkr_main
+```
+
+If the dry run reports an overlap or unclaimed holding, edit the generated JSON so the `positions`
+object contains the exact approved per-strategy quantities, then commit that manifest:
+
+```powershell
+uv run conductor bootstrap ibkr_main --config conductor.toml `
+  --ownership data/bootstrap/ibkr_main.json `
+  --commit --confirm ibkr_main
+```
+
+Bootstrap is create-only, writes positions and cash atomically, and immediately verifies that the
+virtual route sums back to the broker. It never submits orders.
+
 ## Install
 
 Python 3.12+ and `uv` are recommended.

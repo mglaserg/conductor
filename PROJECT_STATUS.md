@@ -64,10 +64,13 @@ cutover checklist in `docs/WINDOWS_ETSA_RPS_TLAQ_MIGRATION.md` are satisfied.
   is refused as a hot config edit;
 - separate multi-account offline paper NAVs through `[paper.portfolio_navs]` without touching live
   broker-NAV behavior;
-- strategy lifecycle, status, doctor, worker-status, dashboard, Windows scheduler and migration
-  helpers;
+- strategy lifecycle, status, doctor, worker-status, route ownership bootstrap, dashboard, Windows
+  scheduler and migration helpers;
 - `start_nautilus_workers.bat` for the current two-route Windows topology;
 - operator convenience wrappers `nautilus_start.bat`, `nautilus_status.bat`, and `nautilus_doctor.bat`;
+- dry-run-first, create-only route bootstrap with exact broker quantity conservation, automatic
+  single-owner routes, intent-assisted shared-route ownership inference, explicit manifests for
+  ambiguity, allocator-consistent cash seeding, and atomic commit/reconciliation;
 - canonical startup-position identity normalization so native IB symbols such as `AEP` reconcile
   exactly against Conductor/Nautilus IDs such as `EQ.US.AEP`.
 
@@ -148,7 +151,7 @@ Never summarize the current state as production-ready.
 2. Start both IBKR paper workers and make both `worker-status` commands clean, including account-ID
    match.
 3. Verify per-account NetLiquidation and resulting ETSA/RPS/TLAQ capital budgets.
-4. Approve initial virtual ownership/cash and make all-route `conductor doctor` clean.
+4. Run and approve `conductor bootstrap` for both live routes, then make all-route `conductor doctor` clean.
 5. Prove one deliberately small paper order independently on `ibkr_main` and `ibkr_tlaq`, including
    fills, commissions, reconciliation, restart recovery and an empty repeated cycle.
 6. Repeat the failure drills in the migration guide, especially wrong-account, unrelated-worker

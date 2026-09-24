@@ -14,3 +14,4 @@ __pycache__/
 /data/runs/
 /logs/
 /data/ibkr_instruments.json
+/data/bootstrap/

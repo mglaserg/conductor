@@ -205,14 +205,30 @@ expected broker              = 150
 TLAQ ownership is **not** part of that sum when TLAQ is on `ibkr_tlaq`.
 
 For named portfolios, `allocated_capital` is derived from the route's NAV and allocator on each
-runtime startup. Do not manually seed capital just to mirror the weights. `seed.positions` and
-`seed.cash` remain bootstrap assertions and must be approved against reality. TLAQ cash may be
-negative.
+runtime startup. Do not manually seed capital just to mirror the weights. Use the route bootstrap
+workflow instead of hand-editing `seed.positions` or SQLite:
 
-After the initial bootstrap, SQLite owns the virtual state. Changing a strategy's `route_id` is not
-a hot account transfer: Conductor refuses a persisted strategy account whose stored route differs
-from configuration. Moving a strategy to another account requires an explicit broker transfer or
-re-establishment plus a reviewed virtual-book migration/bootstrap.
+```powershell
+# Dedicated account: TLAQ is the sole owner, so this should be mechanically committable.
+uv run conductor bootstrap ibkr_tlaq --config conductor.toml
+uv run conductor bootstrap ibkr_tlaq --config conductor.toml --commit --confirm ibkr_tlaq
+
+# Shared account: ETSA/RPS ownership is inferred only when latest intents uniquely claim a holding.
+uv run conductor bootstrap ibkr_main --config conductor.toml `
+  --write-template data/bootstrap/ibkr_main.json
+```
+
+If the shared-account dry run reports no unresolved holdings, commit it directly. Otherwise review
+and edit the generated manifest until every broker quantity is assigned exactly, then pass it with
+`--ownership`. Bootstrap back-solves each virtual cash balance from allocator-assigned capital and
+marked starting positions; negative cash is valid for leveraged books. The position/cash write is
+atomic and immediately followed by route reconciliation.
+
+After the initial bootstrap, SQLite owns the virtual state. Bootstrap is create-only and refuses to
+overwrite an existing route. Changing a strategy's `route_id` is not a hot account transfer:
+Conductor refuses a persisted strategy account whose stored route differs from configuration. Moving
+a strategy to another account requires an explicit broker transfer or re-establishment plus a
+separate reviewed virtual-book migration workflow.
 
 ## 6. Install and verify Conductor
 

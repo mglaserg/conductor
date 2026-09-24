@@ -61,7 +61,8 @@ Windows equity strategies without rewriting their strategy logic.
   batch/deduplicated target-universe warm-up for cold instrument caches;
 - explicit shadow mode with live submission disabled by default;
 - initial US-equity canonical mapping to IBKR SMART instruments;
-- strategy activate, disable, retire, status, doctor, and worker-status commands;
+- strategy activate, disable, retire, status, doctor, worker-status, and dry-run-first route
+  ownership bootstrap commands;
 - read-only local dashboard;
 - Windows Task Scheduler helpers and an operator migration runbook.
 - portable offline `run --paper`/`status --paper` execution with a separate SQLite source of truth,
@@ -73,7 +74,7 @@ Windows equity strategies without rewriting their strategy logic.
 1. Install and import the selected NautilusTrader 2.x build on the actual Windows trading machine.
 2. Wire the production ETSA, RPSchteroids, and TLAQ adapters without changing their proven signal
    calculations or schedules.
-3. Review and approve each strategy's initial virtual positions and cash; verify allocator-derived capital against each route's broker NAV.
+3. Run the create-only route bootstrap workflow, review any shared-account ambiguity, and approve each strategy's initial virtual positions/cash against allocator-derived capital and broker NAV.
 4. Account for every physical IBKR position on the correct route/account and make `conductor doctor` clean across all configured routes.
 5. Prove both workers' heartbeat, account-ID match, per-account NAV publication, automatic broker
    position preflight/startup reconstruction, batch target-universe warm-up, price availability, and

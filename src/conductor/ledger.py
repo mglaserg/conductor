@@ -558,6 +558,105 @@ class ConductorLedger:
                 now,
             )
 
+    def bootstrap_route_ownership(
+        self,
+        *,
+        route_id: str,
+        positions: Iterable[VirtualTarget],
+        cash_by_owner: dict[tuple[str, str], Decimal],
+    ) -> None:
+        """Atomically establish starting ownership for one previously-unowned broker route.
+
+        Bootstrap is intentionally create-only. Replacing an existing virtual book is an economic
+        migration and requires a separate workflow so a typo cannot silently rewrite ownership.
+        """
+        rows = list(positions)
+        if any(row.route_id != route_id for row in rows):
+            raise ValueError(f"bootstrap rows must all belong to route {route_id}")
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT COUNT(*) AS count FROM virtual_positions WHERE route_id=?",
+                (route_id,),
+            ).fetchone()
+            if existing is not None and int(existing["count"]) != 0:
+                raise RuntimeError(
+                    f"route {route_id} already has virtual ownership; use an explicit migration "
+                    "workflow instead of bootstrap"
+                )
+
+            for strategy_id, book_id in sorted(cash_by_owner):
+                account = conn.execute(
+                    "SELECT route_id FROM strategy_accounts WHERE strategy_id=? AND book_id=?",
+                    (strategy_id, book_id),
+                ).fetchone()
+                if account is None:
+                    raise KeyError(f"strategy account not seeded: {strategy_id}/{book_id}")
+                if account["route_id"] != route_id:
+                    raise RuntimeError(
+                        f"strategy {strategy_id}/{book_id} belongs to {account['route_id']}, "
+                        f"not bootstrap route {route_id}"
+                    )
+
+            conn.executemany(
+                """
+                INSERT INTO virtual_positions(
+                    strategy_id, book_id, sleeve_id, route_id, instrument, quantity, notional,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        row.strategy_id,
+                        row.book_id,
+                        row.sleeve_id,
+                        row.route_id,
+                        row.instrument,
+                        str(row.target),
+                        str(row.notional),
+                        now,
+                    )
+                    for row in rows
+                    if row.target != 0
+                ],
+            )
+            for (strategy_id, book_id), cash in sorted(cash_by_owner.items()):
+                result = conn.execute(
+                    """
+                    UPDATE strategy_accounts SET cash=?, updated_at=?
+                    WHERE strategy_id=? AND book_id=? AND route_id=?
+                    """,
+                    (str(cash), now, strategy_id, book_id, route_id),
+                )
+                if result.rowcount != 1:
+                    raise RuntimeError(
+                        f"failed to update bootstrap cash for {strategy_id}/{book_id}"
+                    )
+
+            self._append_event_on_conn(
+                conn,
+                "bootstrap.ownership_committed",
+                {
+                    "route_id": route_id,
+                    "position_count": len(rows),
+                    "positions": [
+                        {
+                            "strategy_id": row.strategy_id,
+                            "book_id": row.book_id,
+                            "instrument": row.instrument,
+                            "quantity": str(row.target),
+                            "notional": str(row.notional),
+                        }
+                        for row in rows
+                    ],
+                    "cash": {
+                        f"{strategy_id}/{book_id}": str(cash)
+                        for (strategy_id, book_id), cash in sorted(cash_by_owner.items())
+                    },
+                },
+                now,
+            )
+
     def virtual_positions(self) -> list[dict[str, str]]:
         with self._connect() as conn:
             rows = conn.execute(

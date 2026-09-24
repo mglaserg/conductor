@@ -164,9 +164,11 @@ If ETSA and RPS make opposing changes on `ibkr_main`, `VirtualAccountingEngine` 
 transfer and only the net residual is eligible for that broker account. TLAQ cannot cross with them
 while it is assigned to `ibkr_tlaq`, even if the canonical instrument is identical.
 
-Bootstrap seeds are explicit operator assertions. Conductor never reverse-engineers the ownership
-split from aggregate broker positions, and changing an already-persisted strategy's route is refused
-until an explicit account migration/bootstrap is performed.
+Bootstrap ownership is an explicit operator-approved assertion. Conductor may use the latest
+persisted strategy intents to identify a unique claimant for a broker-held instrument, but it never
+invents an overlapping split or derives share ownership from allocator weights. Ambiguous or
+unclaimed positions require an explicit ownership manifest. Changing an already-persisted strategy's
+route is refused until a separate account migration workflow is performed.
 
 ## Routing and instrument identity
 
