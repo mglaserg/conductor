@@ -253,20 +253,42 @@ def test_worker_quote_subscription_is_deduplicated() -> None:
     assert calls == ["AAPL=STK.SMART"]
 
 
-def test_worker_instrument_request_is_deduplicated_while_pending() -> None:
+def test_worker_instrument_request_is_deduplicated_while_pending(monkeypatch) -> None:
+    import conductor.adapters.nautilus_ibkr_worker as worker_module
     from conductor.adapters.nautilus_ibkr_worker import _BridgeStrategyMixin
 
     class Cache:
         def instrument(self, _instrument_id):
             return None
 
+    class Venue:
+        @staticmethod
+        def from_str(value):
+            return value
+
+    monkeypatch.setattr(worker_module, "_import_nautilus", lambda: {"Venue": Venue})
+
     worker = object.__new__(_BridgeStrategyMixin)
     worker.cache = Cache()
     worker._instrument_requests_inflight = set()
-    calls: list[str] = []
-    worker.request_instrument = lambda instrument_id: calls.append(str(instrument_id))
+    calls: list[dict] = []
+    worker.request_instruments = lambda **kwargs: calls.append(kwargs)
 
-    worker._ensure_instrument_request("TLT=STK.SMART")
-    worker._ensure_instrument_request("TLT=STK.SMART")
+    worker._ensure_instrument_request("EQ.US.TLT", "TLT=STK.SMART")
+    worker._ensure_instrument_request("EQ.US.TLT", "TLT=STK.SMART")
 
-    assert calls == ["TLT=STK.SMART"]
+    assert calls == [
+        {
+            "venue": "IB",
+            "params": {
+                "ib_contracts": (
+                    {
+                        "symbol": "TLT",
+                        "secType": "STK",
+                        "exchange": "SMART",
+                        "currency": "USD",
+                    },
+                )
+            },
+        }
+    ]

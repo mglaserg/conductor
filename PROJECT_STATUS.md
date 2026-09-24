@@ -7,6 +7,9 @@ where the product is going; this file describes what is true now and what should
 
 ## Current objective
 
+Cold US-equity targets now use IB contract dictionaries for qualification instead of relying on naked RAW symbol parsing; failed qualification is short-lived and retryable.
+
+
 Promote the V0.4 Windows migration runtime from locally implemented alpha code to an operationally
 proven replacement for Dagster orchestration and broker execution for ETSA, RPSchteroids, and TLAQ.
 
@@ -52,7 +55,7 @@ cutover checklist in `docs/WINDOWS_ETSA_RPS_TLAQ_MIGRATION.md` are satisfied.
   instruments enter the provider `load_ids` before startup reconciliation and broker-reported marks
   are already available in the bridge for ownership bootstrap;
 - startup readiness gated on broker-position reconstruction rather than merely on a live heartbeat;
-- batch target-universe warm-up API with **serialized** cold IBKR contract resolution, so only one
+- batch target-universe warm-up API with **serialized** cold IBKR contract qualification, so only one
   missing symbol is in-flight at a time while instrument-request and quote-subscription dedupe stays
   active; each cold symbol gets its own bridge timeout and exact-symbol diagnostics;
 - configured-vs-worker-reported IBKR account-ID validation that fails closed;

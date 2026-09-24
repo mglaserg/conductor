@@ -382,6 +382,8 @@ preflight/reconciliation gate have completed. Before each portfolio cycle Conduc
 route's complete target universe in one worker request; the worker deduplicates instrument requests
 and quote subscriptions while waiting for usable marks.
 
+Cold US-equity discovery uses IB contract dictionaries through Nautilus's IB instrument provider; a cold symbol fails fast if contract qualification does not complete, and successful qualifications remain eligible for the configured provider cache.
+
 > **Current Nautilus rc4/rc5 IB limitation:** startup historical-fill reconciliation sends the
 > namespaced Nautilus account ID back to IB, which IB rejects with error 321. This is an upstream
 > adapter bug, not a Conductor route/account mismatch. Keep `live_orders_enabled = false` until a

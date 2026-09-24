@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.0a13 - 2026-09-24
+
+### Fixed
+
+- Replaced symbol-only cold US-equity discovery (`AUB=STK.SMART`) with Nautilus IB contract
+  qualification via `request_instruments(..., params={"ib_contracts": ...})`. Cold targets now send
+  an explicit IB stock contract (`symbol`, `STK`, `SMART`, `USD`) through the instrument provider,
+  allowing IB to return authoritative contract details while SMART remains the routing exchange.
+- Added a short 15-second worker-side cold-contract deadline (20-second caller ceiling). A bad or
+  unavailable symbol now fails quickly with its canonical ID instead of consuming the route's
+  180-second execution/request budget.
+- Failed qualification clears the worker's in-flight resolver state so later strategy runs can retry
+  cleanly instead of inheriting a permanently poisoned symbol.
+- Qualified instruments continue to use the configured Nautilus IB `cache_path`, while Conductor's
+  bridge persists the resulting Nautilus ID, mark and IB `conId` metadata when available.
+
+### Validation
+
+- Added regressions for the generic AUB stock-contract query, request deduplication on the contract
+  path, and cleanup after an expired cold-symbol qualification.
+- Full suite: 90 passed.
+
 ## 0.4.0a12 - 2026-09-24
 
 ### Fixed

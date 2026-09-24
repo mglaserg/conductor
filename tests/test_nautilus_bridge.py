@@ -444,3 +444,86 @@ max_instrument_nav = 0.5
     assert store.instrument("ibkr", "EQ.US.SYM33")["price"] == "133"
     assert canonical_us_equity_id("AEP") == "EQ.US.AEP"
     assert canonical_us_equity_id("EQ.US.AEP") == "EQ.US.AEP"
+
+
+def test_cold_stock_resolution_uses_ib_contract_qualification(monkeypatch):
+    from types import SimpleNamespace
+
+    import conductor.adapters.nautilus_ibkr_worker as worker_module
+    from conductor.adapters.nautilus_ibkr_worker import (
+        _BridgeStrategyMixin,
+        ib_stock_contract_query,
+    )
+
+    assert ib_stock_contract_query("EQ.US.AUB") == {
+        "symbol": "AUB",
+        "secType": "STK",
+        "exchange": "SMART",
+        "currency": "USD",
+    }
+
+    class FakeVenue:
+        @staticmethod
+        def from_str(value):
+            return f"VENUE:{value}"
+
+    monkeypatch.setattr(worker_module, "_import_nautilus", lambda: {"Venue": FakeVenue})
+
+    calls = []
+    fake = SimpleNamespace(
+        cache=SimpleNamespace(instrument=lambda _instrument_id: None),
+        _instrument_requests_inflight=set(),
+        request_instruments=lambda **kwargs: calls.append(kwargs),
+    )
+    fake._instrument_key = _BridgeStrategyMixin._instrument_key.__get__(fake)
+
+    instrument_id = "AUB=STK.SMART"
+    _BridgeStrategyMixin._ensure_instrument_request(fake, "EQ.US.AUB", instrument_id)
+    _BridgeStrategyMixin._ensure_instrument_request(fake, "EQ.US.AUB", instrument_id)
+
+    assert calls == [
+        {
+            "venue": "VENUE:IB",
+            "params": {
+                "ib_contracts": (
+                    {
+                        "symbol": "AUB",
+                        "secType": "STK",
+                        "exchange": "SMART",
+                        "currency": "USD",
+                    },
+                )
+            },
+        }
+    ]
+    assert instrument_id in fake._instrument_requests_inflight
+
+
+def test_expired_cold_stock_resolution_fails_and_clears_inflight(monkeypatch):
+    from types import SimpleNamespace
+
+    import conductor.adapters.nautilus_ibkr_worker as worker_module
+    from conductor.adapters.nautilus_ibkr_worker import _BridgeStrategyMixin
+
+    class FakePriceType:
+        MID = "MID"
+        LAST = "LAST"
+
+    monkeypatch.setattr(worker_module, "_import_nautilus", lambda: {"PriceType": FakePriceType})
+    monkeypatch.setattr(worker_module.time, "monotonic", lambda: 100.0)
+
+    failures = []
+    store = SimpleNamespace(fail=lambda request_id, error: failures.append((request_id, error)))
+    fake = SimpleNamespace(
+        cache=SimpleNamespace(instrument=lambda _instrument_id: None),
+        _bridge_store=store,
+        _pending_resolves={"REQ1": ("EQ.US.AUB", "AUB=STK.SMART", 99.0)},
+        _instrument_requests_inflight={"AUB=STK.SMART"},
+    )
+    fake._instrument_key = _BridgeStrategyMixin._instrument_key.__get__(fake)
+
+    _BridgeStrategyMixin._refresh_pending_resolves(fake)
+
+    assert failures == [("REQ1", "IB contract qualification timed out for EQ.US.AUB")]
+    assert fake._pending_resolves == {}
+    assert fake._instrument_requests_inflight == set()

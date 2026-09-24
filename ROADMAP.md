@@ -77,7 +77,7 @@ Windows equity strategies without rewriting their strategy logic.
 3. Run the create-only route bootstrap workflow, review any shared-account ambiguity, and approve each strategy's initial virtual positions/cash against allocator-derived capital and broker NAV.
 4. Account for every physical IBKR position on the correct route/account and make `conductor doctor` clean across all configured routes.
 5. Prove both workers' heartbeat, account-ID match, per-account NAV publication, automatic broker
-   position preflight/startup reconstruction, serialized target-universe warm-up, price availability,
+   position preflight/startup reconstruction, serialized target-universe contract qualification, price availability,
    and restart recovery against IBKR paper.
 6. Prove a small paper order end to end, including fill quantity, average price, commission,
    reconciliation, and an empty second cycle.

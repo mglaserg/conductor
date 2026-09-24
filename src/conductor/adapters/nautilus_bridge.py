@@ -380,8 +380,9 @@ class NautilusBridgeExecutionAdapter:
             raise NautilusBridgeError(f"worker has no NetLiquidation for {self.route_id}")
         return Decimal(value)
 
-    def _wait(self, request_id: str) -> dict:
-        deadline = time.monotonic() + self.request_timeout_seconds
+    def _wait(self, request_id: str, *, timeout_seconds: float | None = None) -> dict:
+        timeout = self.request_timeout_seconds if timeout_seconds is None else timeout_seconds
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             self._require_worker()
             row = self.store.request(request_id)
@@ -424,7 +425,12 @@ class NautilusBridgeExecutionAdapter:
                 "resolve_instrument",
                 {"instrument": instrument},
             )
-            self._wait(request_id)
+            # Contract qualification should complete quickly.  Keep the much larger route request
+            # timeout for order/execution workflows, but fail a bad cold symbol promptly.
+            self._wait(
+                request_id,
+                timeout_seconds=min(float(self.request_timeout_seconds), 20.0),
+            )
             row = self.store.instrument(self.route_id, instrument)
         if row is None:
             raise NautilusBridgeError(f"worker did not resolve {instrument}")
