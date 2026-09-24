@@ -1,0 +1,5 @@
+warning: `VIRTUAL_ENV=C:\Users\mglas\Documents\GitHub\Conductor\.venv` does not match the project environment path `.venv` and will be ignored; use `--active` to target the active environment instead
+   Building rpschteroids @ file:///C:/Users/mglas/Documents/trading/RPSchteroids
+      Built rpschteroids @ file:///C:/Users/mglas/Documents/trading/RPSchteroids
+Uninstalled 1 package in 10ms
+Installed 1 package in 73ms
