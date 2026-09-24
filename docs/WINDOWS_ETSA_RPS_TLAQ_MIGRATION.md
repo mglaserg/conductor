@@ -140,11 +140,21 @@ uv run conductor worker-status ibkr_main --config conductor.toml
 uv run conductor worker-status ibkr_tlaq --config conductor.toml
 ```
 
+The equivalent convenience wrappers are:
+
+```powershell
+.\nautilus_start.bat
+.\nautilus_status.bat
+.\nautilus_doctor.bat
+```
+
 On startup each worker performs a read-only exact-account `reqPositions` preflight before Nautilus
-constructs its live node. Every non-zero stock holding is added to the instrument provider's startup
-`load_ids`; the worker remains `ready=false` until Nautilus reconstructs the same broker position
-set. This prevents IB position reports from being skipped merely because their instruments were not
-yet in cache.
+constructs its live node. Native IB stock symbols are normalized immediately to Conductor canonical
+IDs (for example `AEP` -> `EQ.US.AEP`). Every non-zero stock holding is added to the instrument
+provider's startup `load_ids`; the worker remains `ready=false` until Nautilus reconstructs the same
+canonical broker position set with matching quantities. This prevents IB position reports from being
+skipped because their instruments were not yet in cache without weakening the exact reconciliation
+gate.
 
 Do not continue until both workers report `ready: true`, the configured account ID matches, and
 `net_liquidation` is non-null. Before each strategy portfolio cycle Conductor warms that route's

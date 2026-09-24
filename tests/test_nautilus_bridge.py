@@ -333,7 +333,11 @@ TEST = 1.0
 
 
 def test_broker_position_preflight_puts_all_held_instruments_in_startup_load_ids(tmp_path):
-    from conductor.adapters.nautilus_ibkr_worker import _preload_ids, _seed_startup_positions
+    from conductor.adapters.nautilus_ibkr_worker import (
+        _preload_ids,
+        _seed_startup_positions,
+        canonical_us_equity_id,
+    )
     from conductor.config import load_runtime_config
 
     config_path = tmp_path / "conductor.toml"
@@ -360,9 +364,13 @@ max_instrument_nav = 0.5
     store = NautilusBridgeStore(config.routes["ibkr"].bridge_db)
     positions = {f"SYM{i:02d}": Decimal(i + 1) for i in range(34)}
 
-    _seed_startup_positions(store, "ibkr", positions)
+    canonical_positions = _seed_startup_positions(store, "ibkr", positions)
     load_ids = _preload_ids(config, "ibkr", store)
 
     assert len(load_ids) == 34
     assert set(load_ids) == {f"SYM{i:02d}=STK.SMART" for i in range(34)}
-    assert {position.instrument for position in store.positions("ibkr")} == set(positions)
+    expected = {f"EQ.US.SYM{i:02d}" for i in range(34)}
+    assert set(canonical_positions) == expected
+    assert {position.instrument for position in store.positions("ibkr")} == expected
+    assert canonical_us_equity_id("AEP") == "EQ.US.AEP"
+    assert canonical_us_equity_id("EQ.US.AEP") == "EQ.US.AEP"

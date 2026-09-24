@@ -56,8 +56,9 @@ Windows equity strategies without rewriting their strategy logic.
 - route-scoped strategy runtime startup so an unrelated account worker outage does not block another account;
 - persistent Nautilus IBKR worker boundary with heartbeat, broker state, instrument resolution,
   request recovery, orders, fills, and commissions;
-- exact-account broker-position preflight feeding startup `load_ids`, readiness gated on successful
-  position reconstruction, and batch/deduplicated target-universe warm-up for cold instrument caches;
+- exact-account broker-position preflight feeding startup `load_ids`, canonical native-IB-to-Conductor
+  stock identity normalization, readiness gated on successful position reconstruction, and
+  batch/deduplicated target-universe warm-up for cold instrument caches;
 - explicit shadow mode with live submission disabled by default;
 - initial US-equity canonical mapping to IBKR SMART instruments;
 - strategy activate, disable, retire, status, doctor, and worker-status commands;

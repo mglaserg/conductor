@@ -9,3 +9,8 @@ __pycache__/
 .env
 
 *.egg-info/
+
+# Conductor runtime artifacts
+/data/runs/
+/logs/
+/data/ibkr_instruments.json

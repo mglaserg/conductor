@@ -1,6 +1,6 @@
 # Conductor project status
 
-Last reviewed: **2026-09-23**
+Last reviewed: **2026-09-24**
 
 This is the canonical handoff document for the repository's current state. `ROADMAP.md` describes
 where the product is going; this file describes what is true now and what should happen next.
@@ -66,14 +66,17 @@ cutover checklist in `docs/WINDOWS_ETSA_RPS_TLAQ_MIGRATION.md` are satisfied.
   broker-NAV behavior;
 - strategy lifecycle, status, doctor, worker-status, dashboard, Windows scheduler and migration
   helpers;
-- `start_nautilus_workers.bat` for the current two-route Windows topology.
+- `start_nautilus_workers.bat` for the current two-route Windows topology;
+- operator convenience wrappers `nautilus_start.bat`, `nautilus_status.bat`, and `nautilus_doctor.bat`;
+- canonical startup-position identity normalization so native IB symbols such as `AEP` reconcile
+  exactly against Conductor/Nautilus IDs such as `EQ.US.AEP`.
 
 These statements describe implemented code and local automated verification, not completed IBKR
 paper, shadow, or production validation.
 
 ## Verification state
 
-- Full automated suite on 2026-09-23: **79 passed**.
+- Full automated suite on 2026-09-24: **80 passed**.
 - New multi-account coverage verifies:
   - independent broker NAVs and 85/15 + 100% strategy budgeting;
   - exact strategy membership/weight validation per route;
@@ -121,7 +124,8 @@ Never summarize the current state as production-ready.
    preflight/reconciliation gate, batch instrument warm-up, marks, restart recovery and stale-worker
    blocking on Windows. The previous `ibkr_main` log proved that cold-cache reconciliation could
    skip 34 broker positions and that serial instrument resolution could exceed the old 60 second
-   bridge timeout; a8 addresses both failure modes but still requires live TWS validation.
+   bridge timeout; a8 addressed both failure modes; a9 additionally fixes the native-vs-canonical symbol identity
+   mismatch exposed by the first live TWS startup check. Fresh live TWS validation is still required.
 3. Initial virtual positions and cash require human approval against the correct physical account.
 4. `max_margin_utilization` is represented in configuration/status but is **not yet enforced**;
    current worker state does not publish the required margin-utilization measurement.

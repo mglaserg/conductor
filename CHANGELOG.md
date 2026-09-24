@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.0a9 - 2026-09-24
+
+### Fixed
+
+- Normalized exact-account IBKR stock-position preflight symbols into Conductor canonical IDs
+  (for example `AEP` -> `EQ.US.AEP`) before startup reconciliation. This preserves the strict
+  set-and-quantity equality gate while preventing the same holdings from appearing as both missing
+  native symbols and extra canonical symbols.
+- Live bridge position mapping now applies the same US-equity canonicalization, including when an
+  older bridge database still contains native-symbol aliases from a previous worker version.
+
+### Added
+
+- Added `nautilus_start.bat`, `nautilus_status.bat`, and a cleaned-up `nautilus_doctor.bat` for the
+  normal two-route Windows operator workflow.
+- Ignored new runtime run artifacts, worker logs, and the local IB instrument cache in Git. Existing
+  historical run artifacts already tracked by older commits are intentionally left untouched.
+
+### Safety
+
+- Startup reconciliation still requires exact canonical instrument/quantity equality; this change
+  normalizes identity rather than weakening the readiness gate.
+- `live_orders_enabled = false` remains unchanged.
+
 ## 0.4.0a8 - 2026-09-23
 
 ### Fixed

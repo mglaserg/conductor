@@ -23,26 +23,37 @@ class NautilusWorkerConfigError(RuntimeError):
     pass
 
 
+def canonical_us_equity_id(value: str) -> str:
+    """Normalize an IB/native US stock symbol to Conductor's canonical equity ID.
+
+    IB position callbacks report native symbols such as ``AEP`` while strategy/runtime state uses
+    canonical IDs such as ``EQ.US.AEP``. Startup reconciliation must compare one identity scheme,
+    otherwise the same 39 holdings can appear as 39 missing plus 39 extra positions.
+    """
+    instrument = str(value).strip().upper()
+    if not instrument:
+        raise ValueError("empty canonical instrument")
+    if instrument.startswith("EQ.US."):
+        symbol = instrument.removeprefix("EQ.US.")
+    elif "." not in instrument:
+        symbol = instrument
+    else:
+        raise ValueError(
+            f"V0.4 IB worker only resolves US equities; unsupported canonical ID {value!r}"
+        )
+    if not symbol or any(ch.isspace() for ch in symbol):
+        raise ValueError(f"invalid US equity symbol {symbol!r}")
+    return f"EQ.US.{symbol}"
+
+
 def canonical_to_ib_raw(canonical_id: str) -> str:
     """Map Conductor's initial US-equity IDs to Nautilus IB RAW symbology.
 
     V0.4's production migration is equities-only. Futures/options will get explicit parsers rather
     than guessing contract semantics from a string.
     """
-    value = canonical_id.strip()
-    if not value:
-        raise ValueError("empty canonical instrument")
-    if value.startswith("EQ.US."):
-        symbol = value.removeprefix("EQ.US.")
-    elif "." not in value:
-        # Backwards-compatible migration path for the current ETSA/RPS/TLAQ ticker output.
-        symbol = value
-    else:
-        raise ValueError(
-            f"V0.4 IB worker only resolves US equities; unsupported canonical ID {canonical_id!r}"
-        )
-    if not symbol or any(ch.isspace() for ch in symbol):
-        raise ValueError(f"invalid US equity symbol {symbol!r}")
+    canonical = canonical_us_equity_id(canonical_id)
+    symbol = canonical.removeprefix("EQ.US.")
     return f"{symbol}=STK.SMART"
 
 
@@ -650,7 +661,7 @@ class _BridgeStrategyMixin:
         PriceType = types["PriceType"]
         Venue = types["Venue"]
         reverse = {
-            row["nautilus_instrument_id"]: row["instrument"]
+            row["nautilus_instrument_id"]: canonical_us_equity_id(row["instrument"])
             for row in self._bridge_store.known_instruments(self._bridge_route_id)
         }
         positions: list[BrokerPosition] = []
@@ -795,9 +806,17 @@ def _seed_startup_positions(
     store: NautilusBridgeStore,
     route_id: str,
     positions: dict[str, Decimal],
-) -> None:
-    """Seed exact broker-held stocks into the bridge before Nautilus reconciliation."""
-    for canonical in positions:
+) -> dict[str, Decimal]:
+    """Seed exact broker-held stocks using Conductor canonical IDs.
+
+    ``reqPositions`` returns native IB symbols. Normalize them at this ingress boundary so startup
+    expectations, bridge mappings, strategy targets, and live Nautilus positions all compare the
+    same economic identity.
+    """
+    canonical_positions: dict[str, Decimal] = {}
+    for instrument, quantity in positions.items():
+        canonical = canonical_us_equity_id(instrument)
+        canonical_positions[canonical] = canonical_positions.get(canonical, ZERO) + quantity
         nautilus_id = canonical_to_ib_raw(canonical)
         store.upsert_instrument(
             route_id,
@@ -807,13 +826,19 @@ def _seed_startup_positions(
             asset_class="equity",
             venue="SMART",
         )
+    canonical_positions = {
+        instrument: quantity
+        for instrument, quantity in canonical_positions.items()
+        if quantity != ZERO
+    }
     store.replace_positions(
         route_id,
         [
             BrokerPosition(canonical, quantity, route_id)
-            for canonical, quantity in sorted(positions.items())
+            for canonical, quantity in sorted(canonical_positions.items())
         ],
     )
+    return canonical_positions
 
 
 def _preload_ids(config: RuntimeConfig, route_id: str, store: NautilusBridgeStore) -> list[str]:
@@ -894,7 +919,11 @@ def run_nautilus_ibkr_worker(config_path: str | Path, route_id: str) -> None:
             account=route_cfg.route.account,
             timeout_seconds=max(10.0, float(route_cfg.account_summary_timeout_seconds)),
         )
-        _seed_startup_positions(store, route_id, startup_expected_positions)
+        startup_expected_positions = _seed_startup_positions(
+            store,
+            route_id,
+            startup_expected_positions,
+        )
     except Exception as exc:  # fail closed: startup reconciliation must be exhaustive
         startup_bootstrap_error = f"IBKR position bootstrap failed: {exc}"
 

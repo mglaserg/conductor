@@ -310,6 +310,14 @@ uv run conductor worker-status ibkr_main --config conductor.toml
 uv run conductor worker-status ibkr_tlaq --config conductor.toml
 ```
 
+For the normal Windows operator loop, the root convenience wrappers avoid retyping the CLI:
+
+```powershell
+.\nautilus_start.bat
+.\nautilus_status.bat
+.\nautilus_doctor.bat
+```
+
 Nautilus namespaces IB account IDs internally (for example `IB-U123...`) even though the IB adapter
 configuration uses the native account number (`U123...`). The worker resolves the authoritative
 namespaced ID from Nautilus's live cache and verifies its native portion before publishing NAV.
