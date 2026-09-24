@@ -464,7 +464,7 @@ class _BridgeStrategyMixin:
         IB stock qualification is a *query*, not a promise that ``SMART`` will remain the
         instrument venue.  Nautilus deliberately resolves stocks to the primary/listing venue
         when IB supplies one (for example ``AUB=STK.NYSE``).  The response is captured in
-        ``on_instruments`` and bound back to Conductor's canonical ``EQ.US.*`` ID.
+        ``on_instrument`` and bound back to Conductor's canonical ``EQ.US.*`` ID.
         """
         key = canonical_us_equity_id(canonical)
         if key in self._instrument_requests_inflight:
@@ -520,71 +520,51 @@ class _BridgeStrategyMixin:
         self._pending_warms[request["request_id"]] = pending
         self._refresh_pending_warms()
 
-    def on_instruments(self, instruments: Any) -> None:  # Nautilus callback
-        """Bind IB-qualified stock responses to Conductor canonical IDs.
+    def on_instrument(self, instrument: Any) -> None:  # Nautilus callback
+        """Bind one IB-qualified stock response to its Conductor canonical ID.
 
-        ``request_instruments(..., ib_contracts=...)`` returns an InstrumentsResponse.  Nautilus
-        may assign a stock's primary/listing venue, so the returned ``instrument.id`` is the
-        authority.  Because Conductor serializes cold resolution, normally exactly one candidate
-        matches the pending canonical symbol; ambiguity fails closed instead of guessing.
+        Nautilus delivers both ``request_instrument`` and ``request_instruments`` results through
+        ``on_instrument`` one instrument at a time.  For cold IB stock qualification, the returned
+        instrument ID is authoritative because IB/Nautilus may replace SMART with the stock's
+        primary/listing venue (for example ``AUB=STK.NYSE``).
         """
-        candidates: dict[str, dict[str, Any]] = {}
-        for instrument in instruments or []:
-            try:
-                canonical = canonical_us_equity_id(_instrument_native_stock_symbol(instrument))
-            except Exception:
-                continue
-            candidates.setdefault(canonical, {})[str(instrument.id)] = instrument
+        try:
+            canonical = canonical_us_equity_id(_instrument_native_stock_symbol(instrument))
+        except Exception:
+            return
 
         pending_canonicals = {
-            canonical for canonical, _instrument_id, _deadline in self._pending_resolves.values()
+            value for value, _instrument_id, _deadline in self._pending_resolves.values()
         }
         for pending in self._pending_warms.values():
             pending_canonicals.update(pending)
 
-        for canonical in sorted(pending_canonicals):
-            matched = list(candidates.get(canonical, {}).values())
-            if not matched:
-                continue
-            if len(matched) > 1:
-                ids = sorted(str(instrument.id) for instrument in matched)
-                error = f"IB contract qualification for {canonical} was ambiguous: {ids}"
-                self._instrument_requests_inflight.discard(canonical)
-                for request_id, (value, _instrument_id, _deadline) in list(
-                    self._pending_resolves.items()
-                ):
-                    if value == canonical:
-                        self._bridge_store.fail(request_id, error)
-                        del self._pending_resolves[request_id]
-                for request_id, pending in list(self._pending_warms.items()):
-                    if canonical in pending:
-                        self._bridge_store.fail(request_id, error)
-                        del self._pending_warms[request_id]
-                continue
+        # Ignore unrelated instrument callbacks from startup loading or other Nautilus activity.
+        if canonical not in pending_canonicals:
+            return
 
-            instrument = matched[0]
-            instrument_id = instrument.id
-            self._instrument_requests_inflight.discard(canonical)
-            self._ensure_quote_subscription(instrument_id)
-            self._bridge_store.upsert_instrument(
-                self._bridge_route_id,
-                canonical,
-                nautilus_instrument_id=str(instrument_id),
-                price=None,
-                contract_multiplier=_decimal(getattr(instrument, "multiplier", None))
-                or Decimal("1"),
-                lot_size=_decimal(getattr(instrument, "size_increment", None)) or Decimal("1"),
-                asset_class="equity",
-                venue=str(getattr(instrument_id, "venue", "SMART")),
-                broker_id=_instrument_broker_id(instrument),
-            )
-            for request_id, (value, _old_id, deadline) in list(self._pending_resolves.items()):
-                if value == canonical:
-                    self._pending_resolves[request_id] = (value, instrument_id, deadline)
-            for pending in self._pending_warms.values():
-                if canonical in pending:
-                    pending[canonical] = instrument_id
-            self.log.info(f"Qualified {canonical} -> {instrument_id}")
+        instrument_id = instrument.id
+        self._instrument_requests_inflight.discard(canonical)
+        self._ensure_quote_subscription(instrument_id)
+        self._bridge_store.upsert_instrument(
+            self._bridge_route_id,
+            canonical,
+            nautilus_instrument_id=str(instrument_id),
+            price=None,
+            contract_multiplier=_decimal(getattr(instrument, "multiplier", None))
+            or Decimal("1"),
+            lot_size=_decimal(getattr(instrument, "size_increment", None)) or Decimal("1"),
+            asset_class="equity",
+            venue=str(getattr(instrument_id, "venue", "SMART")),
+            broker_id=_instrument_broker_id(instrument),
+        )
+        for request_id, (value, _old_id, deadline) in list(self._pending_resolves.items()):
+            if value == canonical:
+                self._pending_resolves[request_id] = (value, instrument_id, deadline)
+        for pending in self._pending_warms.values():
+            if canonical in pending:
+                pending[canonical] = instrument_id
+        self.log.info(f"Qualified {canonical} -> {instrument_id}")
 
         self._refresh_pending_resolves()
         self._refresh_pending_warms()
@@ -1181,7 +1161,7 @@ def run_nautilus_ibkr_worker(config_path: str | Path, route_id: str) -> None:
         on_stop = _BridgeStrategyMixin.on_stop
         on_degrade = _BridgeStrategyMixin.on_degrade
         on_fault = _BridgeStrategyMixin.on_fault
-        on_instruments = _BridgeStrategyMixin.on_instruments
+        on_instrument = _BridgeStrategyMixin.on_instrument
         on_order_filled = _BridgeStrategyMixin.on_order_filled
         on_order_rejected = _BridgeStrategyMixin.on_order_rejected
         on_order_denied = _BridgeStrategyMixin.on_order_denied

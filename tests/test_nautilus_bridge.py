@@ -524,6 +524,13 @@ def test_cold_stock_resolution_uses_ib_contract_qualification(monkeypatch):
     assert fake._instrument_requests_inflight == {"EQ.US.AUB"}
 
 
+def test_bridge_uses_nautilus_on_instrument_callback_for_batch_contract_results():
+    from conductor.adapters.nautilus_ibkr_worker import _BridgeStrategyMixin
+
+    assert callable(_BridgeStrategyMixin.on_instrument)
+    assert not hasattr(_BridgeStrategyMixin, "on_instruments")
+
+
 def test_qualified_stock_response_binds_returned_listing_venue(monkeypatch):
     from types import SimpleNamespace
 
@@ -566,7 +573,7 @@ def test_qualified_stock_response_binds_returned_listing_venue(monkeypatch):
         subscribed=None,
     )
 
-    _BridgeStrategyMixin.on_instruments(fake, [instrument])
+    _BridgeStrategyMixin.on_instrument(fake, instrument)
 
     assert fake._pending_resolves["REQ1"][1] is instrument_id
     assert fake._instrument_requests_inflight == set()

@@ -7,7 +7,7 @@ where the product is going; this file describes what is true now and what should
 
 ## Current objective
 
-Cold US-equity targets now use IB contract dictionaries for qualification and bind Conductor canonical IDs to the authoritative instrument IDs returned by Nautilus/IB (including primary/listing venues); failed qualification is short-lived and retryable.
+Cold US-equity targets now use IB contract dictionaries for qualification and bind Conductor canonical IDs from Nautilus's actual `on_instrument()` callback to the authoritative instrument IDs returned by IB (including primary/listing venues); failed qualification is short-lived and retryable.
 
 
 Promote the V0.4 Windows migration runtime from locally implemented alpha code to an operationally
@@ -85,7 +85,7 @@ paper, shadow, or production validation.
 
 ## Verification state
 
-- Full automated suite on 2026-09-24: **92 passed**.
+- Full automated suite on 2026-09-24: **93 passed**.
 - New multi-account coverage verifies:
   - independent broker NAVs and 85/15 + 100% strategy budgeting;
   - exact strategy membership/weight validation per route;

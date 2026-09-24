@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.0a15 - 2026-09-24
+
+### Fixed
+
+- Corrected the cold IB contract-qualification callback contract: Nautilus delivers both
+  `request_instrument()` and `request_instruments()` results through `on_instrument()` one
+  instrument at a time. The worker now binds qualified listing-venue IDs (for example
+  `AUB=STK.NYSE`) from the callback Nautilus actually invokes instead of waiting on a nonexistent
+  `on_instruments()` callback.
+- Unrelated startup/provider instrument callbacks are ignored unless their canonical symbol is
+  currently pending qualification, so the change does not disturb startup reconciliation.
+
+### Validation
+
+- Added a regression pinning the Nautilus callback name and retained the returned-listing-venue /
+  nested-`conId` qualification tests.
+- Full suite: 93 passed.
+
 ## 0.4.0a14 - 2026-09-24
 
 ### Fixed
@@ -10,9 +28,9 @@
   `EQ.US.AUB -> AUB=STK.NYSE`) while SMART remains the routing exchange.
 - Routed `request_instruments(..., ib_contracts=...)` explicitly to Nautilus client `IB`, matching
   Nautilus' v2 IB example, and passed the contract payload as a JSON array.
-- Added `on_instruments` handling for the IB batch response, exact native-symbol matching,
-  fail-closed ambiguity detection, returned-venue quote subscription, and nested IB `conId`
-  extraction from `instrument.info["contract"]`.
+- Added returned-venue response binding, exact native-symbol matching, quote subscription, and
+  nested IB `conId` extraction from `instrument.info["contract"]`; the callback name used in this
+  release was corrected in `0.4.0a15`.
 - Preserved previously qualified listing-venue mappings during startup position seeding/preload so
   a worker restart cannot silently rewrite a known `NYSE`/`NASDAQ` identity back to SMART.
 
