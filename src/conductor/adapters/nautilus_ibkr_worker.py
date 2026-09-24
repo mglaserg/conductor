@@ -10,7 +10,7 @@ from typing import Any
 
 from conductor.adapters.ibkr_account_summary import (
     IbkrAccountSummaryNavProvider,
-    query_ibkr_stock_positions,
+    query_ibkr_stock_portfolio_snapshot,
 )
 from conductor.adapters.nautilus import check_nautilus_v2
 from conductor.adapters.nautilus_bridge import NautilusBridgeStore, execution_report_payload
@@ -806,14 +806,18 @@ def _seed_startup_positions(
     store: NautilusBridgeStore,
     route_id: str,
     positions: dict[str, Decimal],
+    *,
+    prices: dict[str, Decimal] | None = None,
 ) -> dict[str, Decimal]:
     """Seed exact broker-held stocks using Conductor canonical IDs.
 
-    ``reqPositions`` returns native IB symbols. Normalize them at this ingress boundary so startup
-    expectations, bridge mappings, strategy targets, and live Nautilus positions all compare the
-    same economic identity.
+    IB portfolio callbacks return native symbols. Normalize them at this ingress boundary so
+    startup expectations, bridge mappings, strategy targets, and live Nautilus positions all
+    compare the same economic identity. Broker-reported marks are persisted at the same time so
+    ownership bootstrap can value existing holdings without a second quote warm-up cycle.
     """
     canonical_positions: dict[str, Decimal] = {}
+    prices = prices or {}
     for instrument, quantity in positions.items():
         canonical = canonical_us_equity_id(instrument)
         canonical_positions[canonical] = canonical_positions.get(canonical, ZERO) + quantity
@@ -822,7 +826,7 @@ def _seed_startup_positions(
             route_id,
             canonical,
             nautilus_instrument_id=nautilus_id,
-            price=None,
+            price=prices.get(instrument),
             asset_class="equity",
             venue="SMART",
         )
@@ -912,7 +916,7 @@ def run_nautilus_ibkr_worker(config_path: str | Path, route_id: str) -> None:
     startup_expected_positions: dict[str, Decimal] = {}
     startup_bootstrap_error: str | None = None
     try:
-        startup_expected_positions = query_ibkr_stock_positions(
+        startup_snapshot = query_ibkr_stock_portfolio_snapshot(
             host=route_cfg.host,
             port=route_cfg.port,
             client_id=route_cfg.account_summary_client_id,
@@ -922,7 +926,8 @@ def run_nautilus_ibkr_worker(config_path: str | Path, route_id: str) -> None:
         startup_expected_positions = _seed_startup_positions(
             store,
             route_id,
-            startup_expected_positions,
+            startup_snapshot.positions,
+            prices=startup_snapshot.prices,
         )
     except Exception as exc:  # fail closed: startup reconciliation must be exhaustive
         startup_bootstrap_error = f"IBKR position bootstrap failed: {exc}"

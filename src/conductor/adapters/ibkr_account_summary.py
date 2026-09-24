@@ -11,6 +11,13 @@ class IbkrAccountSummaryError(RuntimeError):
     """Raised when the direct TWS account-summary fallback cannot produce safe NAV."""
 
 
+
+
+@dataclass(frozen=True, slots=True)
+class IbkrStockPortfolioSnapshot:
+    positions: dict[str, Decimal]
+    prices: dict[str, Decimal]
+
 @dataclass(frozen=True, slots=True)
 class IbkrNavSnapshot:
     net_liquidation: Decimal | None
@@ -144,6 +151,163 @@ def query_ibkr_net_liquidation(
     finally:
         try:
             app.cancelAccountSummary(request_id)
+        except Exception:
+            pass
+        try:
+            app.disconnect()
+        except Exception:
+            pass
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
+
+
+
+def query_ibkr_stock_portfolio_snapshot(
+    *,
+    host: str,
+    port: int,
+    client_id: int,
+    account: str,
+    timeout_seconds: float = 10.0,
+    app_factory: Callable[[str], Any] | None = None,
+) -> IbkrStockPortfolioSnapshot:
+    """Read exact-account stock positions and broker portfolio marks in one TWS snapshot.
+
+    ``reqAccountUpdates`` supplies ``updatePortfolio`` callbacks with the native account's
+    current position and market value.  Using those broker-reported marks lets Conductor seed the
+    bridge before Nautilus starts, so one-time ownership bootstrap does not need to subscribe to
+    dozens of quotes merely to back-solve virtual cash.
+    """
+    if not account or account == "paper":
+        raise IbkrAccountSummaryError("a native IB account code is required")
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+
+    if app_factory is None:
+        from ibapi.client import EClient
+        from ibapi.wrapper import EWrapper
+
+        class PortfolioApp(EWrapper, EClient):
+            def __init__(self) -> None:
+                EWrapper.__init__(self)
+                EClient.__init__(self, self)
+                self.ready_event = threading.Event()
+                self.download_done_event = threading.Event()
+                self.positions: dict[str, Decimal] = {}
+                self.market_values: dict[str, Decimal] = {}
+                self.market_prices: dict[str, Decimal] = {}
+                self.unsupported: list[str] = []
+                self.fatal_errors: list[str] = []
+
+            def nextValidId(self, orderId: int) -> None:  # noqa: N802 - IB callback API
+                self.ready_event.set()
+
+            def updatePortfolio(  # noqa: N802 - IB callback API
+                self,
+                contract,
+                position,
+                marketPrice,
+                marketValue,
+                averageCost,
+                unrealizedPNL,
+                realizedPNL,
+                accountName,
+            ) -> None:
+                if str(accountName) != account:
+                    return
+                qty = _parse_decimal(position)
+                if qty == 0:
+                    return
+                sec_type = str(getattr(contract, "secType", "") or "").upper()
+                symbol = str(getattr(contract, "symbol", "") or "").strip()
+                if sec_type != "STK" or not symbol:
+                    self.unsupported.append(
+                        f"{symbol or '<unknown>'}:{sec_type or '<unknown>'}"
+                    )
+                    return
+                self.positions[symbol] = self.positions.get(symbol, Decimal("0")) + qty
+                value = _parse_decimal(marketValue)
+                self.market_values[symbol] = self.market_values.get(
+                    symbol, Decimal("0")
+                ) + value
+                price = _parse_decimal(marketPrice)
+                if price > 0:
+                    self.market_prices[symbol] = price
+
+            def accountDownloadEnd(self, accountName: str) -> None:  # noqa: N802 - IB callback API
+                if str(accountName) == account:
+                    self.download_done_event.set()
+
+            def error(self, reqId: int, errorCode: int, errorString: str, *args: Any) -> None:
+                if int(errorCode) in {321, 326, 502, 504, 1100, 1300}:
+                    self.fatal_errors.append(f"IB error {errorCode}: {errorString}")
+                    if int(errorCode) in {321, 326, 502, 504, 1300}:
+                        self.ready_event.set()
+                        self.download_done_event.set()
+
+        app = PortfolioApp()
+    else:
+        app = app_factory(account)
+
+    thread: threading.Thread | None = None
+    try:
+        app.connect(host, int(port), clientId=int(client_id))
+        thread = threading.Thread(
+            target=app.run,
+            name=f"conductor-ib-portfolio-{account}",
+            daemon=True,
+        )
+        thread.start()
+        if not app.ready_event.wait(timeout_seconds):
+            raise IbkrAccountSummaryError(
+                f"timed out waiting for TWS API readiness on {host}:{port} client_id={client_id}"
+            )
+        if app.fatal_errors:
+            raise IbkrAccountSummaryError(app.fatal_errors[-1])
+
+        app.reqAccountUpdates(True, account)
+        if not app.download_done_event.wait(timeout_seconds):
+            raise IbkrAccountSummaryError(
+                f"timed out waiting for broker portfolio snapshot for {account}"
+            )
+        if app.fatal_errors:
+            raise IbkrAccountSummaryError(app.fatal_errors[-1])
+        unsupported = list(getattr(app, "unsupported", []))
+        if unsupported:
+            raise IbkrAccountSummaryError(
+                "IB account contains unsupported non-stock positions for the equities-only "
+                f"worker: {', '.join(sorted(unsupported))}"
+            )
+
+        positions = {
+            str(symbol): Decimal(str(qty))
+            for symbol, qty in dict(getattr(app, "positions", {})).items()
+            if Decimal(str(qty)) != 0
+        }
+        market_values = {
+            str(symbol): Decimal(str(value))
+            for symbol, value in dict(getattr(app, "market_values", {})).items()
+        }
+        reported_prices = {
+            str(symbol): Decimal(str(price))
+            for symbol, price in dict(getattr(app, "market_prices", {})).items()
+        }
+        prices: dict[str, Decimal] = {}
+        for symbol, qty in positions.items():
+            market_value = market_values.get(symbol)
+            if market_value is not None and market_value != 0:
+                derived = market_value / qty
+                if derived > 0:
+                    prices[symbol] = derived
+                    continue
+            reported = reported_prices.get(symbol)
+            if reported is not None and reported > 0:
+                prices[symbol] = reported
+
+        return IbkrStockPortfolioSnapshot(positions=positions, prices=prices)
+    finally:
+        try:
+            app.reqAccountUpdates(False, account)
         except Exception:
             pass
         try:

@@ -297,6 +297,33 @@ def test_batch_warm_resolves_many_instruments_with_one_bridge_request(tmp_path):
     assert [row["kind"] for row in rows] == ["warm_instruments"]
 
 
+
+def test_batch_warm_skips_request_when_startup_snapshot_already_seeded_marks(tmp_path):
+    path = tmp_path / "bridge.sqlite"
+    store = NautilusBridgeStore(path)
+    _ready(store)
+    for symbol, price in (("AAPL", "225.50"), ("TLT", "90.25")):
+        store.upsert_instrument(
+            "ibkr",
+            symbol,
+            nautilus_instrument_id=f"{symbol}=STK.SMART",
+            price=Decimal(price),
+            asset_class="equity",
+            venue="SMART",
+        )
+    adapter = NautilusBridgeExecutionAdapter(
+        bridge_db=path,
+        route_id="ibkr",
+        live_orders_enabled=False,
+        request_timeout_seconds=2,
+    )
+
+    adapter.warm_instruments(["TLT", "AAPL"])
+
+    with store._connect() as conn:
+        rows = conn.execute("SELECT kind FROM requests").fetchall()
+    assert rows == []
+
 def test_default_ibkr_request_timeout_allows_cold_cache_over_sixty_seconds(tmp_path):
     from conductor.config import load_runtime_config
 
@@ -364,7 +391,10 @@ max_instrument_nav = 0.5
     store = NautilusBridgeStore(config.routes["ibkr"].bridge_db)
     positions = {f"SYM{i:02d}": Decimal(i + 1) for i in range(34)}
 
-    canonical_positions = _seed_startup_positions(store, "ibkr", positions)
+    prices = {symbol: Decimal("100") + i for i, symbol in enumerate(positions)}
+    canonical_positions = _seed_startup_positions(
+        store, "ibkr", positions, prices=prices
+    )
     load_ids = _preload_ids(config, "ibkr", store)
 
     assert len(load_ids) == 34
@@ -372,5 +402,7 @@ max_instrument_nav = 0.5
     expected = {f"EQ.US.SYM{i:02d}" for i in range(34)}
     assert set(canonical_positions) == expected
     assert {position.instrument for position in store.positions("ibkr")} == expected
+    assert store.instrument("ibkr", "EQ.US.SYM00")["price"] == "100"
+    assert store.instrument("ibkr", "EQ.US.SYM33")["price"] == "133"
     assert canonical_us_equity_id("AEP") == "EQ.US.AEP"
     assert canonical_us_equity_id("EQ.US.AEP") == "EQ.US.AEP"

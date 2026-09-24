@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.0a11 - 2026-09-24
+
+### Fixed
+
+- Replaced the startup quantity-only IBKR position preflight used by the live worker with an
+  exact-account portfolio snapshot that also captures broker-reported market prices/market values.
+- Seeded those broker marks into the Nautilus bridge alongside canonical startup positions.
+  Ownership bootstrap therefore reuses the already-reconciled broker snapshot instead of issuing a
+  second batch quote warm-up merely to back-solve starting virtual cash.
+- This removes the observed bootstrap timeout after a healthy worker had already reconciled the
+  route's positions.
+
+### Safety
+
+- Portfolio snapshots remain filtered to the configured native IB account and still fail closed on
+  any non-stock holding in the equities-only worker.
+- The bootstrap manifest remains one-time migration state; no strategy-specific ownership universe
+  was added to `conductor.toml`.
+- Bootstrap still requires exact broker-vs-manifest quantities and remains trade-free/create-only.
+
 ## 0.4.0a10 - 2026-09-24
 
 ### Added

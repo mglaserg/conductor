@@ -251,10 +251,12 @@ uv run conductor status --paper --config examples/offline_paper_smoke.toml
 ## Bootstrap scope is explicit
 
 Nautilus reconciliation requires the instruments referenced by broker reports to be loaded *before*
-startup reconciliation runs. The IBKR worker now performs an exact-account read-only position
-preflight through TWS, converts every non-zero stock holding into a RAW Nautilus instrument ID, and
-adds those IDs to the provider's startup `load_ids`. The worker stays `ready=false` until Nautilus
-reconstructs the same broker position set.
+startup reconciliation runs. The IBKR worker now performs an exact-account read-only portfolio
+preflight through TWS, captures every non-zero stock holding plus its broker-reported mark, converts
+the holding into a RAW Nautilus instrument ID, and adds those IDs to the provider's startup
+`load_ids`. The worker stays `ready=false` until Nautilus reconstructs the same broker position set.
+The broker marks are persisted into the bridge so ownership bootstrap can value already-held
+positions without opening a second quote warm-up cycle.
 
 `preload_instruments` remains available for reconciliation-only instruments that should be loaded
 even when they are not currently held:
@@ -288,7 +290,27 @@ uv run conductor bootstrap ibkr_main --config conductor.toml --commit --confirm 
 ```
 
 If the dry run reports an overlap or unclaimed holding, edit the generated JSON so the `positions`
-object contains the exact approved per-strategy quantities, then commit that manifest:
+object contains the exact approved per-strategy quantities. The manifest format is intentionally
+small and contains only one-time starting ownership:
+
+```json
+{
+  "route_id": "ibkr_main",
+  "positions": {
+    "ETSA": {
+      "EQ.US.AEP": "-59"
+    },
+    "RPSchteroids": {
+      "EQ.US.EMB": "86",
+      "EQ.US.IEF": "109"
+    }
+  }
+}
+```
+
+Every non-zero broker position on the route must be assigned, and the quantities across strategies
+must sum exactly to the broker quantity for each instrument. Extra fields such as `unresolved` from a
+generated template may remain in the file; the command reads the `positions` object. Then commit it:
 
 ```powershell
 uv run conductor bootstrap ibkr_main --config conductor.toml `

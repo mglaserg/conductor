@@ -48,8 +48,9 @@ cutover checklist in `docs/WINDOWS_ETSA_RPS_TLAQ_MIGRATION.md` are satisfied.
   of another account's strategy run;
 - all-node `status` and `doctor` paths that intentionally inspect every configured route;
 - one worker/bridge per IBKR account with distinct client IDs/bridge DBs;
-- exact-account IBKR stock-position preflight before Nautilus node construction, so broker-held
-  instruments enter the provider `load_ids` before startup reconciliation;
+- exact-account IBKR stock-portfolio preflight before Nautilus node construction, so broker-held
+  instruments enter the provider `load_ids` before startup reconciliation and broker-reported marks
+  are already available in the bridge for ownership bootstrap;
 - startup readiness gated on broker-position reconstruction rather than merely on a live heartbeat;
 - batch target-universe warm-up plus deduplicated instrument requests/quote subscriptions, avoiding
   serial cold-cache resolution and duplicate subscription storms;

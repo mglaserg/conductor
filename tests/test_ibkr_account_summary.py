@@ -10,6 +10,7 @@ from conductor.adapters.ibkr_account_summary import (
     IbkrAccountSummaryError,
     IbkrAccountSummaryNavProvider,
     query_ibkr_net_liquidation,
+    query_ibkr_stock_portfolio_snapshot,
 )
 
 
@@ -220,6 +221,108 @@ def test_direct_position_bootstrap_fails_closed_on_non_stock_holding() -> None:
     app = FakePositionApp("U_MAIN", [("U_MAIN", "ES", "FUT", "1")])
     with pytest.raises(IbkrAccountSummaryError, match="unsupported non-stock positions"):
         query_ibkr_stock_positions(
+            host="127.0.0.1",
+            port=7496,
+            client_id=11302,
+            account="U_MAIN",
+            app_factory=lambda _account: app,
+        )
+
+
+class _FakeContract:
+    def __init__(self, symbol: str, sec_type: str = "STK") -> None:
+        self.symbol = symbol
+        self.secType = sec_type
+
+
+class FakePortfolioApp:
+    def __init__(
+        self,
+        account: str,
+        rows: list[tuple[str, str, str, str, str]],
+    ) -> None:
+        self.account = account
+        self.rows = rows
+        self.ready_event = threading.Event()
+        self.download_done_event = threading.Event()
+        self.positions: dict[str, Decimal] = {}
+        self.market_values: dict[str, Decimal] = {}
+        self.market_prices: dict[str, Decimal] = {}
+        self.unsupported: list[str] = []
+        self.fatal_errors: list[str] = []
+        self.connected = None
+        self.cancelled = False
+        self.disconnected = False
+
+    def connect(self, host: str, port: int, clientId: int) -> None:  # noqa: N803
+        self.connected = (host, port, clientId)
+        self.ready_event.set()
+
+    def run(self) -> None:
+        return
+
+    def reqAccountUpdates(self, subscribe: bool, account: str) -> None:  # noqa: N802
+        if not subscribe:
+            self.cancelled = True
+            return
+        assert account == self.account
+        for row_account, symbol, sec_type, quantity, market_price in self.rows:
+            if row_account != account:
+                continue
+            qty = Decimal(quantity)
+            if qty == 0:
+                continue
+            if sec_type != "STK":
+                self.unsupported.append(f"{symbol}:{sec_type}")
+                continue
+            price = Decimal(market_price)
+            self.positions[symbol] = self.positions.get(symbol, Decimal("0")) + qty
+            self.market_values[symbol] = self.market_values.get(
+                symbol, Decimal("0")
+            ) + qty * price
+            if price > 0:
+                self.market_prices[symbol] = price
+        self.download_done_event.set()
+
+    def disconnect(self) -> None:
+        self.disconnected = True
+
+
+def test_direct_portfolio_snapshot_reads_exact_account_positions_and_marks() -> None:
+    app = FakePortfolioApp(
+        "U_MAIN",
+        [
+            ("U_MAIN", "AAPL", "STK", "100", "250.50"),
+            ("U_MAIN", "TLT", "STK", "-25", "87.20"),
+            ("U_OTHER", "MSFT", "STK", "999", "400"),
+        ],
+    )
+
+    snapshot = query_ibkr_stock_portfolio_snapshot(
+        host="127.0.0.1",
+        port=7496,
+        client_id=11302,
+        account="U_MAIN",
+        app_factory=lambda _account: app,
+    )
+
+    assert snapshot.positions == {
+        "AAPL": Decimal("100"),
+        "TLT": Decimal("-25"),
+    }
+    assert snapshot.prices == {
+        "AAPL": Decimal("250.50"),
+        "TLT": Decimal("87.20"),
+    }
+    assert app.connected == ("127.0.0.1", 7496, 11302)
+    assert app.cancelled is True
+    assert app.disconnected is True
+
+
+def test_direct_portfolio_snapshot_fails_closed_on_non_stock_holding() -> None:
+    app = FakePortfolioApp("U_MAIN", [("U_MAIN", "ES", "FUT", "1", "6000")])
+    with pytest.raises(IbkrAccountSummaryError, match="unsupported non-stock positions"):
+        query_ibkr_stock_portfolio_snapshot(
             host="127.0.0.1",
             port=7496,
             client_id=11302,
