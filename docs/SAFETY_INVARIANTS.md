@@ -104,6 +104,20 @@ without another node or a central dashboard. Fleet telemetry is outbound and rea
 
 **Reason:** observability outages must not become execution outages or create split ownership.
 
+## S14 — External shadow state is not economic ownership
+
+While a legacy executor remains authoritative, Conductor may maintain a separate Shadow Mirror for
+counterfactual planning. Broker quantity may refresh that mirror, but it must never rewrite durable
+`virtual_positions` or cash. Existing shared-route ownership is sticky; new-symbol attribution must
+be uniquely supported by fresh intent or an explicit manifest, and ambiguous changes fail closed.
+
+Promotion from Shadow Mirror to durable virtual ownership is a one-time, explicitly confirmed
+cutover action performed only after the legacy executor is stopped and mirror-to-broker
+reconciliation is clean.
+
+**Reason:** multi-day shadow testing needs current externally implemented state without fabricating
+Conductor fills or erasing the distinction between desired, observed, and owned state.
+
 ## Change-review checklist
 
 For every execution, accounting, routing, lifecycle, or persistence change, reviewers should answer:

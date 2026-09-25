@@ -44,7 +44,9 @@ class VirtualAccountingEngine:
         account = self.ledger.strategy_account(strategy_id, book_id=book_id)
         if account is None:
             raise KeyError(f"strategy account not seeded: {strategy_id}/{book_id}")
-        positions = self.ledger.strategy_positions(strategy_id, book_id=book_id)
+        positions = self.ledger.implementation_strategy_positions(
+            strategy_id, book_id=book_id
+        )
         notionals: dict[str, Decimal] = {}
         for instrument, quantity in positions.items():
             try:
@@ -52,8 +54,15 @@ class VirtualAccountingEngine:
             except KeyError as exc:
                 raise KeyError(f"missing instrument mark for {instrument}") from exc
             notionals[instrument] = quantity * spec.unit_notional
-        cash = Decimal(account["cash"])
         net = sum(notionals.values(), ZERO)
+        shadow = self.ledger.shadow_route(account["route_id"])
+        if shadow is not None and shadow["active"]:
+            # During external-authority shadowing, durable Conductor cash is intentionally frozen.
+            # Back-solve a planning cash balance so the strategy view reflects its current allocated
+            # capital and observed shadow positions without fabricating fill history.
+            cash = Decimal(account["allocated_capital"]) - net
+        else:
+            cash = Decimal(account["cash"])
         gross = sum((abs(value) for value in notionals.values()), ZERO)
         return StrategyAccountView(
             strategy_id=strategy_id,

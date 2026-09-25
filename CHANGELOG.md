@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.4.0a17 - 2026-09-25
+
+### Added
+
+- External-authority **Shadow Mirror** state, stored separately from durable Conductor
+  `virtual_positions`. Broker quantity is authoritative during migration, but strategy ownership is
+  preserved independently instead of being silently rebased into the real virtual ledger.
+- `shadow-refresh <route>` with dry-run-first ownership inference, sticky prior ownership,
+  single-owner exact attribution, unique-current-intent attribution for genuinely new shared-route
+  symbols, explicit-manifest fallback, and fail-closed ambiguity handling.
+- `shadow-cycle <route>` to capture fresh intents for every active strategy on a route before
+  refreshing the mirror and running one counterfactual portfolio cycle. This is the preferred daily
+  ETSA/RPS live-shadow workflow when the active universe changes.
+- `shadow-promote <route> --confirm <route>` for the one-time cutover from a broker-reconciled
+  Shadow Mirror into Conductor-owned virtual positions and cash while live orders are still disabled.
+- Authority-aware `doctor`: active shadow routes reconcile mirror-to-broker while durable
+  virtual-ledger drift remains visible as an informational diagnostic; Conductor-authority routes
+  retain strict virtual-to-broker reconciliation.
+
+### Safety
+
+- An active external Shadow Mirror refuses runtime startup if `live_orders_enabled=true`.
+- Counterfactual shadow cycles can never commit `virtual_positions`, even if desired aggregate state
+  already matches the broker exactly.
+- Position-delta strategies receive current broker-derived shadow ownership on single-owner routes
+  before their subprocess runs. Shared-route shadow cycles refuse position-delta capture because
+  account-level snapshots cannot safely attribute the change.
+- Existing shared-route ownership is sticky; target intent can claim only a brand-new broker symbol
+  and only when exactly one strategy claims it. Multi-owner quantity changes and conflicting claims
+  fail closed rather than guessing.
+- Legacy batch `warm_instruments` bridge requests are retired on worker startup so stale claimed rows
+  from older builds do not remain operationally misleading.
+
+### Changed
+
+- Strategy account views and rebalance-band comparisons use Shadow Mirror positions only while that
+  route is under external shadow authority. Durable Conductor cash/ownership history remains frozen
+  until explicit promotion.
+- Shadow portfolio runs now report `status=planned` instead of overloading `submitted` for a cycle
+  where no live order was sent.
+
+### Validation
+
+- Added coverage for sticky rotation, new-symbol attribution, ambiguous/multi-owner failure,
+  shadow/virtual separation, authority-aware doctor, exact single-owner promotion, route-wide fresh
+  intent capture, live-order refusal, and legacy warm-request cleanup.
+- Full suite: 102 passed.
+
 ## 0.4.0a16 - 2026-09-24
 
 ### Fixed

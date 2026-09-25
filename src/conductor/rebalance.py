@@ -71,11 +71,7 @@ class VirtualRebalanceBuffer:
             (row.strategy_id, row.book_id, row.sleeve_id, row.route_id, row.instrument): row
             for row in desired
         }
-        current_rows = [
-            row
-            for row in self.ledger.virtual_positions()
-            if route_ids is None or row["route_id"] in route_ids
-        ]
+        current_rows = self.ledger.implementation_positions(route_ids=route_ids)
         current_by_key = {
             (
                 row["strategy_id"],

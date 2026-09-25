@@ -244,6 +244,25 @@ class NautilusBridgeStore:
             )
         return request_id
 
+    def fail_legacy_warm_requests(self, route_id: str) -> int:
+        """Retire obsolete batch warm requests left by pre-serialized workers.
+
+        Modern adapters warm through individual ``resolve_instrument`` requests. Old
+        ``warm_instruments`` rows can otherwise remain claimed forever across a long-running worker
+        and create misleading operational noise.
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE requests
+                SET status='failed', completed_at=?,
+                    error='retired legacy warm_instruments request; use serialized resolve_instrument'
+                WHERE route_id=? AND kind='warm_instruments' AND status IN ('pending', 'claimed')
+                """,
+                (_utc_now(), route_id),
+            )
+            return int(cursor.rowcount)
+
     def requeue_claimed(self, route_id: str) -> int:
         """Return abandoned in-flight requests to pending after a worker restart."""
         with self._connect() as conn:

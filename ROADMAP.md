@@ -61,6 +61,9 @@ Windows equity strategies without rewriting their strategy logic.
   target-universe API that serializes cold IB contract resolution with request/subscription dedupe
   and persists the authoritative listing-venue instrument ID returned through Nautilus's `on_instrument()` callback before explicitly routing quote subscription through client `IB`;
 - explicit shadow mode with live submission disabled by default;
+- external-authority Shadow Mirror state separate from durable virtual ownership, with sticky/fail-closed
+  shared-account attribution, route-wide fresh-intent capture, authority-aware reconciliation and
+  explicit cutover promotion;
 - initial US-equity canonical mapping to IBKR SMART instruments;
 - strategy activate, disable, retire, status, doctor, worker-status, and dry-run-first route
   ownership bootstrap commands;
@@ -87,9 +90,13 @@ Windows equity strategies without rewriting their strategy logic.
    failure/timeout, malformed output, terminal rejection, and partial-fill-then-cancel have unit
    coverage. Stale/disconnected worker, delta replay, cross-strategy overlap, broker mismatch, and
    all operational repetitions remain part of the promotion gate.
-8. Run live-account shadow at the real production schedule and explain every mismatch against the
-   existing Dagster path.
-9. Complete a controlled execution-authority cutover with an exercised rollback procedure.
+8. Run `shadow-cycle ibkr_main` / `shadow-cycle ibkr_tlaq` at the real production schedule while
+   Dagster remains authoritative; explain every proposed-trade mismatch and exercise ambiguous
+   ownership failure/recovery.
+9. Stop legacy execution, obtain final clean Shadow Mirror reconciliation, promote one route at a
+   time with `shadow-promote`, then enable Conductor live orders only after the promotion evidence is
+   preserved.
+10. Complete a controlled execution-authority cutover with an exercised rollback procedure.
 
 ### Gate
 

@@ -407,6 +407,14 @@ Check virtual vs physical ownership:
 
 ```powershell
 uv run conductor doctor --config conductor.toml
+
+# While Dagster remains the live execution authority:
+uv run conductor shadow-refresh ibkr_main --config conductor.toml
+uv run conductor shadow-refresh ibkr_main --config conductor.toml --commit --confirm ibkr_main
+uv run conductor shadow-cycle ibkr_main --config conductor.toml
+
+# One-time cutover only, after legacy execution is stopped and doctor is clean:
+uv run conductor shadow-promote ibkr_main --config conductor.toml --confirm ibkr_main
 ```
 
 Show runtime/strategy state:

@@ -317,12 +317,69 @@ For the actual live accounts, use the live TWS/Gateway API port and real account
 live_orders_enabled = false
 ```
 
-Run ETSA, RPS and TLAQ at their normal production times while Dagster remains authoritative. Compare
-for every strategy:
+Dagster remains the execution authority during this phase. Do **not** continuously overwrite
+Conductor's durable `virtual_positions` from the broker. Instead activate the external-authority
+**Shadow Mirror**, which is separate migration state.
+
+Initialize/refresh one route dry-run first:
+
+```powershell
+uv run conductor shadow-refresh ibkr_main --config conductor.toml
+uv run conductor shadow-refresh ibkr_main --config conductor.toml --commit --confirm ibkr_main
+
+uv run conductor shadow-refresh ibkr_tlaq --config conductor.toml
+uv run conductor shadow-refresh ibkr_tlaq --config conductor.toml --commit --confirm ibkr_tlaq
+```
+
+Rules:
+
+- TLAQ is the only strategy on `ibkr_tlaq`, so current broker positions are exactly attributable to
+  TLAQ.
+- On shared `ibkr_main`, an existing symbol keeps its previous strategy owner even when its target
+  goes to zero; ownership disappears only when the broker position actually reaches zero.
+- A genuinely new broker symbol may be assigned from current strategy intents only when exactly one
+  strategy claims it.
+- A changed multiply-owned symbol, conflicting new-symbol claims, or an unclaimed new symbol fails
+  closed. Supply an explicit ownership manifest rather than guessing.
+- Shadow refresh never modifies the durable Conductor virtual ledger.
+
+For the shared ETSA/RPS route, the preferred daily operation is the route-wide cycle:
+
+```powershell
+uv run conductor shadow-cycle ibkr_main --config conductor.toml
+```
+
+`shadow-cycle` runs both active strategy subprocesses in intent-capture mode first, then refreshes
+the Shadow Mirror using those fresh intents, then performs exactly one counterfactual portfolio
+cycle. This is what makes changing ETSA/RPS active universes safe: today's new symbols are evaluated
+using today's captured intent rather than yesterday's target file.
+
+For the single-owner TLAQ route:
+
+```powershell
+uv run conductor shadow-cycle ibkr_tlaq --config conductor.toml
+```
+
+The TLAQ mirror is refreshed from the broker before its position-delta subprocess receives account
+state, so deltas are applied to the current externally implemented position rather than a stale
+bootstrap snapshot.
+
+After both mirrors are active:
+
+```powershell
+uv run conductor doctor --config conductor.toml
+```
+
+`doctor` is authority-aware. External-shadow routes require Shadow Mirror == broker. It also reports
+virtual-ledger drift separately; that drift is expected while Dagster is still changing the live
+accounts. Conductor-authority routes continue to require virtual ledger == broker.
+
+Compare for every strategy/cycle:
 
 - native strategy result;
 - assigned route/account and broker NAV;
 - resolved strategy capital budget;
+- Shadow Mirror implemented ownership;
 - strategy target state;
 - aggregate desired quantity **within its route**;
 - proposed broker delta;
@@ -330,6 +387,19 @@ for every strategy:
 - post-run broker position.
 
 Explain every mismatch before cutover.
+
+At cutover, stop the legacy executor first, wait for outstanding orders to settle, refresh each
+mirror one final time, require a clean `doctor`, and promote one route while live orders remain
+disabled:
+
+```powershell
+uv run conductor shadow-promote ibkr_main --config conductor.toml --confirm ibkr_main
+uv run conductor shadow-promote ibkr_tlaq --config conductor.toml --confirm ibkr_tlaq
+```
+
+Promotion copies the reconciled Shadow Mirror into Conductor's real virtual ownership and back-solves
+strategy cash from current allocated capital and marked positions. Only after promotion evidence is
+preserved should `live_orders_enabled` be enabled for that route.
 
 ## 11. Task Scheduler
 

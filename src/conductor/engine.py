@@ -29,6 +29,7 @@ class ConductorEngine:
     ledger: ConductorLedger | None = None
     accounting: VirtualAccountingEngine | None = None
     rebalance_buffer: VirtualRebalanceBuffer | None = None
+    external_authority_routes: set[str] = field(default_factory=set)
 
     def run_cycle(
         self, intents: Iterable[StrategyIntent], *, run_id: str | None = None
@@ -170,7 +171,8 @@ class ConductorEngine:
         # For synchronous paper/sandbox execution this commits immediately. For a
         # live async adapter, ownership remains uncommitted until a later cycle sees
         # venue state fully aligned with desired aggregate state.
-        if reconciled and self.ledger:
+        external_shadow = bool(active_routes & self.external_authority_routes)
+        if reconciled and self.ledger and not external_shadow:
             if self.accounting is not None:
                 self.accounting.commit(
                     implemented_virtual,
@@ -182,6 +184,14 @@ class ConductorEngine:
                 self.ledger.replace_virtual_positions(
                     implemented_virtual, route_ids=active_routes
                 )
+        elif reconciled and self.ledger and external_shadow:
+            self.ledger.append_event(
+                "shadow.reconciled_without_virtual_commit",
+                {
+                    "run_id": run_id,
+                    "route_ids": sorted(active_routes & self.external_authority_routes),
+                },
+            )
 
         if self.ledger:
             self.ledger.record_run(

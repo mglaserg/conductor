@@ -9,7 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Iterable, Iterator
 
-from conductor.domain.models import ExposureType, StrategyIntent, VirtualTarget
+from conductor.domain.models import ZERO, ExposureType, StrategyIntent, VirtualTarget
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +184,32 @@ class ConductorLedger:
                     PRIMARY KEY (route_id, instrument),
                     FOREIGN KEY (route_id) REFERENCES paper_routes(route_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS shadow_routes (
+                    route_id TEXT PRIMARY KEY,
+                    authority TEXT NOT NULL DEFAULT 'external',
+                    active INTEGER NOT NULL DEFAULT 1,
+                    initialized_at TEXT NOT NULL,
+                    refreshed_at TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'broker_snapshot',
+                    details_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE TABLE IF NOT EXISTS shadow_positions (
+                    strategy_id TEXT NOT NULL,
+                    book_id TEXT NOT NULL DEFAULT 'main',
+                    sleeve_id TEXT NOT NULL,
+                    route_id TEXT NOT NULL,
+                    instrument TEXT NOT NULL,
+                    quantity TEXT NOT NULL,
+                    notional TEXT NOT NULL,
+                    ownership_source TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (strategy_id, book_id, route_id, instrument)
+                );
+
+                CREATE INDEX IF NOT EXISTS ix_shadow_positions_route
+                    ON shadow_positions(route_id, instrument);
                 """
             )
             self._migrate_virtual_table(conn, "virtual_targets", targets=True)
@@ -959,6 +985,215 @@ class ConductorLedger:
                 )
             )
         return intents
+
+
+    def shadow_route(self, route_id: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM shadow_routes WHERE route_id=?", (route_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        payload = dict(row)
+        payload["active"] = bool(payload["active"])
+        payload["details"] = json.loads(payload.pop("details_json"))
+        return payload
+
+    def shadow_routes(self, *, active_only: bool = False) -> list[dict]:
+        sql = "SELECT * FROM shadow_routes"
+        if active_only:
+            sql += " WHERE active=1"
+        sql += " ORDER BY route_id"
+        with self._connect() as conn:
+            rows = conn.execute(sql).fetchall()
+        out = []
+        for row in rows:
+            payload = dict(row)
+            payload["active"] = bool(payload["active"])
+            payload["details"] = json.loads(payload.pop("details_json"))
+            out.append(payload)
+        return out
+
+    def shadow_positions(self, *, route_id: str | None = None) -> list[dict[str, str]]:
+        with self._connect() as conn:
+            if route_id is None:
+                rows = conn.execute(
+                    "SELECT * FROM shadow_positions ORDER BY route_id, strategy_id, book_id, instrument"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM shadow_positions WHERE route_id=? "
+                    "ORDER BY strategy_id, book_id, instrument",
+                    (route_id,),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def shadow_strategy_positions(
+        self, strategy_id: str, *, book_id: str = "main"
+    ) -> dict[str, Decimal]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT instrument, quantity FROM shadow_positions
+                WHERE strategy_id=? AND book_id=?
+                ORDER BY instrument
+                """,
+                (strategy_id, book_id),
+            ).fetchall()
+        return {row["instrument"]: Decimal(row["quantity"]) for row in rows}
+
+    def implementation_positions(
+        self, *, route_ids: Iterable[str] | None = None
+    ) -> list[dict[str, str]]:
+        """Return the implemented state used for planning.
+
+        Active external-shadow routes read from the shadow mirror. Other routes read from the
+        durable Conductor-owned virtual ledger. This never rewrites ``virtual_positions``.
+        """
+        selected = set(route_ids or ())
+        shadow_active = {
+            row["route_id"] for row in self.shadow_routes(active_only=True)
+            if not selected or row["route_id"] in selected
+        }
+        virtual = [
+            row for row in self.virtual_positions()
+            if (not selected or row["route_id"] in selected)
+            and row["route_id"] not in shadow_active
+        ]
+        shadow = [
+            row for row in self.shadow_positions()
+            if (not selected or row["route_id"] in selected)
+            and row["route_id"] in shadow_active
+        ]
+        return virtual + shadow
+
+    def implementation_strategy_positions(
+        self, strategy_id: str, *, book_id: str = "main"
+    ) -> dict[str, Decimal]:
+        account = self.strategy_account(strategy_id, book_id=book_id)
+        if account is None:
+            return {}
+        shadow = self.shadow_route(account["route_id"])
+        if shadow is not None and shadow["active"]:
+            return self.shadow_strategy_positions(strategy_id, book_id=book_id)
+        return self.strategy_positions(strategy_id, book_id=book_id)
+
+    def replace_shadow_route(
+        self,
+        *,
+        route_id: str,
+        positions: Iterable[VirtualTarget],
+        ownership_sources: dict[tuple[str, str, str], str],
+        source: str = "broker_snapshot",
+        details: dict | None = None,
+    ) -> None:
+        rows = [row for row in positions if row.route_id == route_id and row.target != ZERO]
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            current = conn.execute(
+                "SELECT initialized_at FROM shadow_routes WHERE route_id=?", (route_id,)
+            ).fetchone()
+            initialized_at = now if current is None else current["initialized_at"]
+            conn.execute(
+                """
+                INSERT INTO shadow_routes(
+                    route_id, authority, active, initialized_at, refreshed_at, source, details_json
+                ) VALUES (?, 'external', 1, ?, ?, ?, ?)
+                ON CONFLICT(route_id) DO UPDATE SET
+                    authority='external', active=1, refreshed_at=excluded.refreshed_at,
+                    source=excluded.source, details_json=excluded.details_json
+                """,
+                (route_id, initialized_at, now, source, json.dumps(details or {}, sort_keys=True)),
+            )
+            conn.execute("DELETE FROM shadow_positions WHERE route_id=?", (route_id,))
+            conn.executemany(
+                """
+                INSERT INTO shadow_positions(
+                    strategy_id, book_id, sleeve_id, route_id, instrument, quantity, notional,
+                    ownership_source, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        row.strategy_id,
+                        row.book_id,
+                        row.sleeve_id,
+                        row.route_id,
+                        row.instrument,
+                        str(row.target),
+                        str(row.notional),
+                        ownership_sources.get(
+                            (row.strategy_id, row.book_id, row.instrument), "unknown"
+                        ),
+                        now,
+                    )
+                    for row in rows
+                ],
+            )
+            self._append_event_on_conn(
+                conn,
+                "shadow.route_refreshed",
+                {
+                    "route_id": route_id,
+                    "position_count": len(rows),
+                    "source": source,
+                    "details": details or {},
+                },
+                now,
+            )
+
+    def promote_shadow_route(
+        self,
+        *,
+        route_id: str,
+        cash_by_owner: dict[tuple[str, str], Decimal],
+    ) -> None:
+        """Atomically promote a reconciled external shadow mirror into Conductor ownership."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            shadow = conn.execute(
+                "SELECT active FROM shadow_routes WHERE route_id=?", (route_id,)
+            ).fetchone()
+            if shadow is None or not bool(shadow["active"]):
+                raise RuntimeError(f"route {route_id} has no active shadow mirror")
+            rows = conn.execute(
+                "SELECT * FROM shadow_positions WHERE route_id=?", (route_id,)
+            ).fetchall()
+            conn.execute("DELETE FROM virtual_positions WHERE route_id=?", (route_id,))
+            conn.executemany(
+                """
+                INSERT INTO virtual_positions(
+                    strategy_id, book_id, sleeve_id, route_id, instrument, quantity, notional,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        row["strategy_id"], row["book_id"], row["sleeve_id"], row["route_id"],
+                        row["instrument"], row["quantity"], row["notional"], now
+                    )
+                    for row in rows
+                ],
+            )
+            for (strategy_id, book_id), cash in sorted(cash_by_owner.items()):
+                result = conn.execute(
+                    "UPDATE strategy_accounts SET cash=?, updated_at=? "
+                    "WHERE strategy_id=? AND book_id=? AND route_id=?",
+                    (str(cash), now, strategy_id, book_id, route_id),
+                )
+                if result.rowcount != 1:
+                    raise KeyError(f"strategy account not seeded: {strategy_id}/{book_id}")
+            conn.execute(
+                "UPDATE shadow_routes SET active=0, authority='conductor', refreshed_at=? "
+                "WHERE route_id=?",
+                (now, route_id),
+            )
+            self._append_event_on_conn(
+                conn,
+                "shadow.route_promoted",
+                {"route_id": route_id, "position_count": len(rows)},
+                now,
+            )
 
 
     def seed_virtual_book(

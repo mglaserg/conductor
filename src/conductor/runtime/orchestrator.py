@@ -6,7 +6,7 @@ import subprocess
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping
 from uuid import uuid4
 
 from conductor.accounting import VirtualAccountingEngine
@@ -44,6 +44,7 @@ class StrategyRunOrchestrator:
         engine: ConductorEngine,
         run_root: str | Path,
         profiles: Mapping[str, StrategyRunnerProfile] | None = None,
+        shadow_refresh: Callable[[str], None] | None = None,
     ) -> None:
         self.ledger = ledger
         self.accounting = accounting
@@ -51,6 +52,7 @@ class StrategyRunOrchestrator:
         self.run_root = Path(run_root)
         self.run_root.mkdir(parents=True, exist_ok=True)
         self.profiles = dict(profiles or {})
+        self.shadow_refresh = shadow_refresh
 
     @staticmethod
     def _write_account_state(path: Path, account) -> None:
@@ -89,7 +91,7 @@ class StrategyRunOrchestrator:
             if lifecycle == "retired":
                 targets = {}
             else:
-                targets = self.ledger.strategy_positions(
+                targets = self.ledger.implementation_strategy_positions(
                     profile.strategy_id, book_id=profile.book_id
                 )
             intents.append(
@@ -156,6 +158,7 @@ class StrategyRunOrchestrator:
         *,
         trigger: str = "manual",
         scheduled_for: datetime | None = None,
+        defer_portfolio: bool = False,
     ) -> StrategyRunOutcome:
         run_id = uuid4().hex
         revision = self.ledger.next_runtime_revision(profile.strategy_id, book_id=profile.book_id)
@@ -265,6 +268,22 @@ class StrategyRunOrchestrator:
                 run_id=run_id,
             )
             self.ledger.replace_runtime_intent(intent, run_id=run_id)
+            if defer_portfolio:
+                self.ledger.finish_strategy_run(
+                    run_id,
+                    status="captured",
+                    exit_code=completed.returncode,
+                    canonical_revision=revision,
+                )
+                return StrategyRunOutcome(
+                    run_id=run_id,
+                    strategy_id=profile.strategy_id,
+                    book_id=profile.book_id,
+                    status="captured",
+                    revision=revision,
+                )
+            if self.shadow_refresh is not None:
+                self.shadow_refresh(profile.route_id)
             all_intents = self._portfolio_intents(profile.route_id)
             portfolio_result = self.engine.run_cycle(all_intents, run_id=run_id)
         except Exception as exc:  # noqa: BLE001 - preserve desired-state failure audit
@@ -288,7 +307,10 @@ class StrategyRunOrchestrator:
         if portfolio_result.state is RunState.RECONCILED:
             outcome_status = "succeeded"
             outcome_error = None
-        elif portfolio_result.state in {RunState.PLANNED, RunState.SUBMITTED}:
+        elif portfolio_result.state is RunState.PLANNED:
+            outcome_status = "planned"
+            outcome_error = None
+        elif portfolio_result.state is RunState.SUBMITTED:
             outcome_status = "submitted"
             outcome_error = None
         else:

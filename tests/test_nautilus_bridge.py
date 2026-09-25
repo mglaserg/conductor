@@ -668,3 +668,16 @@ def test_expired_cold_stock_resolution_fails_and_clears_inflight(monkeypatch):
     assert failures == [("REQ1", "IB contract qualification timed out for EQ.US.AUB")]
     assert fake._pending_resolves == {}
     assert fake._instrument_requests_inflight == set()
+
+
+def test_legacy_warm_requests_are_retired_instead_of_requeued_forever(tmp_path):
+    store = NautilusBridgeStore(tmp_path / "bridge.sqlite")
+    request_id = store.enqueue("ibkr", "warm_instruments", {"instruments": ["EQ.US.AAPL"]})
+    claimed = store.claim_pending("ibkr")
+    assert claimed[0]["request_id"] == request_id
+    assert store.fail_legacy_warm_requests("ibkr") == 1
+    row = store.request(request_id)
+    assert row is not None
+    assert row["status"] == "failed"
+    assert "retired legacy warm_instruments" in row["error"]
+    assert store.requeue_claimed("ibkr") == 0

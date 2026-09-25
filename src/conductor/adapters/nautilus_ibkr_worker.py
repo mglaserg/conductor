@@ -388,6 +388,7 @@ class _BridgeStrategyMixin:
         self._request_deadlines: dict[str, float] = {}
 
     def on_start(self) -> None:  # Nautilus callback
+        self._bridge_store.fail_legacy_warm_requests(self._bridge_route_id)
         self._bridge_store.requeue_claimed(self._bridge_route_id)
         self._subscribe_known_instruments()
         self._publish_state(ready=True)

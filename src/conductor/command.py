@@ -46,7 +46,7 @@ def main() -> None:
     )
 
     doctor = sub.add_parser(
-        "doctor", help="read-only bootstrap check: virtual ownership must equal broker positions"
+        "doctor", help="read-only authority-aware reconciliation check"
     )
     doctor.add_argument("--config", default="conductor.toml", type=Path)
 
@@ -74,6 +74,39 @@ def main() -> None:
     bootstrap.add_argument(
         "--confirm",
         help="required with --commit; must exactly match route_id",
+    )
+
+    shadow_refresh = sub.add_parser(
+        "shadow-refresh",
+        help="plan or refresh the external-authority shadow mirror for one route",
+    )
+    shadow_refresh.add_argument("route_id")
+    shadow_refresh.add_argument("--config", default="conductor.toml", type=Path)
+    shadow_refresh.add_argument(
+        "--ownership", type=Path, help="optional explicit ownership manifest for ambiguity"
+    )
+    shadow_refresh.add_argument(
+        "--commit", action="store_true", help="persist the refreshed shadow mirror"
+    )
+    shadow_refresh.add_argument(
+        "--confirm", help="required with --commit; must exactly match route_id"
+    )
+
+    shadow_cycle = sub.add_parser(
+        "shadow-cycle",
+        help="capture fresh intents for every strategy on a route, refresh the mirror, then plan once",
+    )
+    shadow_cycle.add_argument("route_id")
+    shadow_cycle.add_argument("--config", default="conductor.toml", type=Path)
+
+    shadow_promote = sub.add_parser(
+        "shadow-promote",
+        help="promote a reconciled shadow mirror into Conductor virtual ownership at cutover",
+    )
+    shadow_promote.add_argument("route_id")
+    shadow_promote.add_argument("--config", default="conductor.toml", type=Path)
+    shadow_promote.add_argument(
+        "--confirm", help="required; must exactly match route_id"
     )
 
     dashboard = sub.add_parser("dashboard", help="launch the read-only local Streamlit board")
@@ -173,7 +206,10 @@ def main() -> None:
             )
         )
 
-    if args.command in {"run", "status", "doctor", "bootstrap", "activate", "disable", "retire"}:
+    if args.command in {
+        "run", "status", "doctor", "bootstrap", "shadow-refresh", "shadow-cycle",
+        "shadow-promote", "activate", "disable", "retire"
+    }:
         if args.command == "retire" and args.confirm != args.strategy_id:
             raise SystemExit(
                 "REFUSED: retirement can flatten positions; pass --confirm with the exact "
@@ -183,6 +219,14 @@ def main() -> None:
             raise SystemExit(
                 "REFUSED: bootstrap rewrites starting ownership; pass --confirm with the exact "
                 "route ID"
+            )
+        if args.command == "shadow-refresh" and args.commit and args.confirm != args.route_id:
+            raise SystemExit(
+                "REFUSED: shadow refresh changes migration state; pass --confirm with the exact route ID"
+            )
+        if args.command == "shadow-promote" and args.confirm != args.route_id:
+            raise SystemExit(
+                "REFUSED: shadow promotion transfers execution authority; pass --confirm with the exact route ID"
             )
         route_scope = None
         if args.command in {"run", "activate", "disable", "retire"}:
@@ -197,7 +241,7 @@ def main() -> None:
             if len(matches) != 1:
                 raise SystemExit(f"unknown configured strategy: {args.strategy_id}")
             route_scope = {config.strategies[matches[0]].route_id}
-        elif args.command == "bootstrap":
+        elif args.command in {"bootstrap", "shadow-refresh", "shadow-cycle", "shadow-promote"}:
             from conductor.config import load_runtime_config
 
             config = load_runtime_config(args.config)
@@ -247,7 +291,7 @@ def main() -> None:
                     ),
                 }
                 print(json.dumps(payload, indent=2, sort_keys=True))
-                if outcome.status not in {"succeeded", "submitted"}:
+                if outcome.status not in {"succeeded", "planned", "submitted"}:
                     raise SystemExit(2)
                 return
             if args.command == "status":
@@ -257,6 +301,57 @@ def main() -> None:
                 result = app.bootstrap_reconciliation()
                 print(json.dumps(result, indent=2, sort_keys=True))
                 if not result["reconciled"]:
+                    raise SystemExit(3)
+                return
+            if args.command == "shadow-cycle":
+                try:
+                    result = app.shadow_cycle(args.route_id)
+                except (KeyError, RuntimeError, ValueError) as exc:
+                    raise SystemExit(f"REFUSED: {exc}") from exc
+                print(json.dumps(result, indent=2, sort_keys=True))
+                if result["status"] in {"failed", "blocked"}:
+                    raise SystemExit(3)
+                return
+            if args.command == "shadow-promote":
+                try:
+                    result = app.promote_shadow_route(args.route_id)
+                except (KeyError, RuntimeError, ValueError) as exc:
+                    raise SystemExit(f"REFUSED: {exc}") from exc
+                print(json.dumps(result, indent=2, sort_keys=True))
+                return
+            if args.command == "shadow-refresh":
+                ownership = None
+                if args.ownership is not None:
+                    try:
+                        payload = json.loads(args.ownership.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError) as exc:
+                        raise SystemExit(f"INVALID ownership manifest: {exc}") from exc
+                    if not isinstance(payload, dict):
+                        raise SystemExit("INVALID ownership manifest: root must be an object")
+                    manifest_route = payload.get("route_id")
+                    if manifest_route is not None and manifest_route != args.route_id:
+                        raise SystemExit(
+                            f"INVALID ownership manifest: route_id {manifest_route!r} does not match {args.route_id!r}"
+                        )
+                    raw_positions = payload.get("positions", payload.get("ownership"))
+                    if not isinstance(raw_positions, dict):
+                        raise SystemExit("INVALID ownership manifest: expected positions/ownership object")
+                    ownership = {
+                        str(strategy_id): {
+                            str(instrument): Decimal(str(quantity))
+                            for instrument, quantity in positions.items()
+                        }
+                        for strategy_id, positions in raw_positions.items()
+                        if isinstance(positions, dict)
+                    }
+                try:
+                    result = app.refresh_shadow_mirror(
+                        args.route_id, ownership=ownership, commit=args.commit
+                    )
+                except (KeyError, RuntimeError, ValueError) as exc:
+                    raise SystemExit(f"REFUSED: {exc}") from exc
+                print(json.dumps(result, indent=2, sort_keys=True))
+                if not result["committable"]:
                     raise SystemExit(3)
                 return
             if args.command == "bootstrap":

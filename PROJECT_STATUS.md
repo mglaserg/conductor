@@ -1,14 +1,17 @@
 # Conductor project status
 
-Last reviewed: **2026-09-24**
+Last reviewed: **2026-09-25**
 
 This is the canonical handoff document for the repository's current state. `ROADMAP.md` describes
 where the product is going; this file describes what is true now and what should happen next.
 
 ## Current objective
 
-Cold US-equity targets use IB contract dictionaries for qualification and bind Conductor canonical IDs from Nautilus's actual `on_instrument()` callback to the authoritative instrument IDs returned by IB (including primary/listing venues). Quote subscriptions are explicitly routed through logical client `IB`, and the qualified mapping is persisted before quote subscription so market-data errors cannot masquerade as qualification timeouts.
-
+Operate the Windows migration in **external-authority Shadow Mirror** mode while Dagster remains the
+production executor. Shadow state is distinct from Conductor's durable virtual ledger: broker
+positions establish current physical quantity, sticky/fail-closed attribution preserves strategy
+ownership, fresh route-wide intents support changing ETSA/RPS universes, and `virtual_positions` do
+not move until an explicit cutover promotion.
 
 Promote the V0.4 Windows migration runtime from locally implemented alpha code to an operationally
 proven replacement for Dagster orchestration and broker execution for ETSA, RPSchteroids, and TLAQ.

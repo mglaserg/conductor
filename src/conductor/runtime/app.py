@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from decimal import Decimal
 from pathlib import Path
+from uuid import uuid4
 
 from conductor.accounting import VirtualAccountingEngine
 from conductor.adapters.nautilus_bridge import NautilusBridgeExecutionAdapter
@@ -24,7 +25,9 @@ from conductor.portfolio import PortfolioBuilder
 from conductor.rebalance import VirtualRebalanceBuffer
 from conductor.reconcile import DesiredStateReconciler
 from conductor.risk import PortfolioRiskEngine
+from conductor.runtime.models import NativeResultMode
 from conductor.runtime.orchestrator import StrategyRunOrchestrator, StrategyRunOutcome
+from conductor.shadow import ShadowOwnerProfile, infer_shadow_ownership
 
 
 class ConductorRuntimeApp:
@@ -86,6 +89,18 @@ class ConductorRuntimeApp:
                 else:
                     raise ValueError(f"unsupported adapter {route_cfg.route.adapter!r}")
 
+        if not paper:
+            for row in self.ledger.shadow_routes(active_only=True):
+                route_id = row["route_id"]
+                if route_id not in self.route_scope:
+                    continue
+                route_cfg = config.routes[route_id]
+                if route_cfg.live_orders_enabled:
+                    raise ValueError(
+                        f"route {route_id} has active external shadow authority but "
+                        "live_orders_enabled=true; disable Conductor orders before shadowing"
+                    )
+
         self.portfolio_navs = self._resolve_portfolio_navs(paper=paper)
         self.allocation_decisions = self._resolve_allocations()
         initialized_accounts = self._initialize_strategy_accounts(paper=paper)
@@ -117,7 +132,7 @@ class ConductorRuntimeApp:
         }
         # A strategy must receive its current account view before its first run. Resolve marks for
         # every seeded/current holding through the route that actually owns that position.
-        for row in self.ledger.virtual_positions():
+        for row in self.ledger.implementation_positions(route_ids=self.route_scope):
             if row["route_id"] not in self.route_scope:
                 continue
             instrument = row["instrument"]
@@ -181,6 +196,11 @@ class ConductorRuntimeApp:
                 allocations=config.allocations,
                 instruments=self.portfolio.instruments,
             ),
+            external_authority_routes={
+                row["route_id"]
+                for row in self.ledger.shadow_routes(active_only=True)
+                if row["route_id"] in self.route_scope
+            },
         )
         scoped_profiles = {
             strategy_id: profile
@@ -193,6 +213,7 @@ class ConductorRuntimeApp:
             engine=self.engine,
             run_root=self.run_root,
             profiles=scoped_profiles,
+            shadow_refresh=self._refresh_active_shadow_after_intent,
         )
 
     def _pool(self, route_id: str) -> PortfolioConfig:
@@ -384,7 +405,326 @@ class ConductorRuntimeApp:
                 f"strategy {canonical_id} is on route {profile.route_id}, outside runtime scope "
                 f"{sorted(self.route_scope)}"
             )
+        shadow = self.ledger.shadow_route(profile.route_id)
+        if shadow is not None and shadow["active"] and len(self._route_profiles(profile.route_id)) == 1:
+            # Single-owner routes (TLAQ) can refresh from broker state exactly before a delta-native
+            # strategy receives its account snapshot. Shared routes refresh only after fresh intents.
+            self.refresh_shadow_mirror(profile.route_id, commit=True)
         return self.orchestrator.run(profile, trigger=trigger)
+
+    def _route_profiles(self, route_id: str) -> dict[str, object]:
+        return {
+            strategy_id: profile
+            for strategy_id, profile in self.config.strategies.items()
+            if profile.route_id == route_id
+        }
+
+    def _refresh_active_shadow_after_intent(self, route_id: str) -> None:
+        shadow = self.ledger.shadow_route(route_id)
+        if shadow is not None and shadow["active"]:
+            self.refresh_shadow_mirror(route_id, commit=True)
+
+    def _broker_quantities(self, route_id: str) -> dict[str, Decimal]:
+        if route_id not in self.route_adapters:
+            raise ValueError(f"route {route_id} has no execution adapter")
+        quantities: dict[str, Decimal] = defaultdict(lambda: ZERO)
+        for position in self.route_adapters[route_id].positions():  # type: ignore[attr-defined]
+            if position.route_id == route_id:
+                quantities[position.instrument] += position.quantity
+        return {
+            instrument: quantity
+            for instrument, quantity in quantities.items()
+            if quantity != ZERO
+        }
+
+    def refresh_shadow_mirror(
+        self,
+        route_id: str,
+        *,
+        ownership: dict[str, dict[str, Decimal]] | None = None,
+        commit: bool = False,
+    ) -> dict:
+        """Plan or refresh the external-authority shadow mirror for one broker route.
+
+        Existing single-owner assignments are sticky. A genuinely new symbol on a shared route may
+        be attributed only when exactly one current strategy intent claims it. Ambiguity fails closed.
+        The durable ``virtual_positions`` ledger is never modified here.
+        """
+        if self.paper_mode:
+            raise ValueError("shadow mirror is for live broker routes, not paper mode")
+        if route_id not in self.route_scope:
+            raise ValueError(f"shadow route {route_id} is outside runtime scope")
+        if self.config.routes[route_id].live_orders_enabled:
+            raise ValueError(
+                f"route {route_id} cannot enter external shadow while live_orders_enabled=true"
+            )
+        profiles = self._route_profiles(route_id)
+        if not profiles:
+            raise ValueError(f"route {route_id} has no configured strategies")
+
+        broker = self._broker_quantities(route_id)
+        existing_shadow = self.ledger.shadow_route(route_id)
+        source_rows = (
+            self.ledger.shadow_positions(route_id=route_id)
+            if existing_shadow is not None and existing_shadow["active"]
+            else [row for row in self.ledger.virtual_positions() if row["route_id"] == route_id]
+        )
+        previous: dict[tuple[str, str], dict[str, Decimal]] = defaultdict(dict)
+        for row in source_rows:
+            previous[(row["strategy_id"], row["book_id"])][row["instrument"]] = Decimal(
+                row["quantity"]
+            )
+
+        intents = {
+            intent.strategy_id: {key: Decimal(value) for key, value in intent.targets.items()}
+            for intent in self.ledger.runtime_intents()
+            if intent.route_id == route_id and intent.strategy_id in profiles
+        }
+        owner_profiles = {
+            strategy_id: ShadowOwnerProfile(
+                strategy_id=strategy_id,
+                book_id=profile.book_id,
+                sleeve_id=profile.sleeve_id,
+            )
+            for strategy_id, profile in profiles.items()
+        }
+        inferred = infer_shadow_ownership(
+            broker_positions=broker,
+            profiles=owner_profiles,
+            previous=previous,
+            intents=intents,
+            explicit=ownership,
+        )
+
+        assigned: dict[str, dict[str, Decimal]] = {strategy_id: {} for strategy_id in profiles}
+        sources: dict[tuple[str, str, str], str] = {}
+        for assignment in inferred.assignments:
+            assigned[assignment.owner[0]][assignment.instrument] = assignment.quantity
+            sources[(assignment.owner[0], assignment.owner[1], assignment.instrument)] = assignment.source
+
+        position_rows: list[VirtualTarget] = []
+        strategy_details: dict[str, dict[str, object]] = {}
+        if inferred.committable:
+            adapter = self.route_adapters[route_id]
+            warm = getattr(adapter, "warm_instruments", None)
+            if callable(warm) and broker:
+                warm(sorted(broker))
+            provider = getattr(adapter, "instrument_spec", None)
+            if not callable(provider):
+                raise ValueError(f"route {route_id} cannot provide instrument marks for shadowing")
+            specs: dict[str, InstrumentSpec] = {}
+            for instrument in sorted(broker):
+                spec = provider(instrument)
+                specs[instrument] = spec
+                self.portfolio.instruments[instrument] = spec
+            for strategy_id, profile in sorted(profiles.items()):
+                net_notional = ZERO
+                for instrument, quantity in sorted(assigned[strategy_id].items()):
+                    spec = specs[instrument]
+                    notional = quantity * spec.unit_notional
+                    net_notional += notional
+                    position_rows.append(
+                        VirtualTarget(
+                            strategy_id=strategy_id,
+                            book_id=profile.book_id,
+                            sleeve_id=profile.sleeve_id,
+                            route_id=route_id,
+                            instrument=instrument,
+                            target=quantity,
+                            notional=notional,
+                        )
+                    )
+                strategy_details[strategy_id] = {
+                    "book_id": profile.book_id,
+                    "position_count": len(assigned[strategy_id]),
+                    "net_position_notional": str(net_notional),
+                    "positions": {
+                        instrument: str(quantity)
+                        for instrument, quantity in sorted(assigned[strategy_id].items())
+                    },
+                }
+
+        result: dict[str, object] = {
+            "route_id": route_id,
+            "mode": "commit" if commit else "dry_run",
+            "authority": "external_shadow",
+            "baseline": "shadow" if existing_shadow is not None and existing_shadow["active"] else "virtual",
+            "broker_position_count": len(broker),
+            "strategies": strategy_details,
+            "ownership": {
+                strategy_id: {
+                    instrument: str(quantity)
+                    for instrument, quantity in sorted(positions.items())
+                }
+                for strategy_id, positions in sorted(assigned.items())
+            },
+            "ownership_sources": {
+                f"{strategy_id}/{book_id}/{instrument}": source
+                for (strategy_id, book_id, instrument), source in sorted(sources.items())
+            },
+            "warnings": list(inferred.warnings),
+            "unresolved": list(inferred.unresolved),
+            "committable": inferred.committable,
+            "committed": False,
+        }
+        if commit:
+            if not inferred.committable:
+                raise ValueError(
+                    f"shadow mirror for {route_id} is unresolved; do not guess strategy ownership"
+                )
+            self.ledger.replace_shadow_route(
+                route_id=route_id,
+                positions=position_rows,
+                ownership_sources=sources,
+                details={
+                    "broker_position_count": len(broker),
+                    "warnings": list(inferred.warnings),
+                },
+            )
+            self.engine.external_authority_routes.add(route_id)
+            result["committed"] = True
+            result["reconciliation"] = self.shadow_reconciliation(route_id)
+        else:
+            self.ledger.append_event("shadow.route_refresh_planned", result)
+        return result
+
+    def shadow_reconciliation(self, route_id: str | None = None) -> dict:
+        routes = {route_id} if route_id is not None else {
+            row["route_id"] for row in self.ledger.shadow_routes(active_only=True)
+            if row["route_id"] in self.route_scope
+        }
+        differences: list[dict[str, str]] = []
+        shadow_count = 0
+        broker_count = 0
+        for selected_route in sorted(routes):
+            shadow = self.ledger.shadow_route(selected_route)
+            if shadow is None or not shadow["active"]:
+                differences.append({
+                    "route_id": selected_route,
+                    "instrument": "*",
+                    "shadow_expected": "missing",
+                    "broker_actual": "unknown",
+                    "difference": "shadow_not_active",
+                })
+                continue
+            expected: dict[str, Decimal] = defaultdict(lambda: ZERO)
+            for row in self.ledger.shadow_positions(route_id=selected_route):
+                expected[row["instrument"]] += Decimal(row["quantity"])
+            actual = self._broker_quantities(selected_route)
+            shadow_count += len([value for value in expected.values() if value != ZERO])
+            broker_count += len(actual)
+            for instrument in sorted(set(expected) | set(actual)):
+                wanted = expected.get(instrument, ZERO)
+                got = actual.get(instrument, ZERO)
+                if wanted != got:
+                    differences.append({
+                        "route_id": selected_route,
+                        "instrument": instrument,
+                        "shadow_expected": str(wanted),
+                        "broker_actual": str(got),
+                        "difference": str(wanted - got),
+                    })
+        return {
+            "reconciled": not differences,
+            "shadow_position_count": shadow_count,
+            "broker_position_count": broker_count,
+            "differences": differences,
+        }
+
+    def promote_shadow_route(self, route_id: str) -> dict:
+        if self.config.routes[route_id].live_orders_enabled:
+            raise ValueError("promotion must occur while Conductor live orders are still disabled")
+        check = self.shadow_reconciliation(route_id)
+        if not check["reconciled"]:
+            raise ValueError(f"shadow route {route_id} does not reconcile to broker; refusing promotion")
+        profiles = self._route_profiles(route_id)
+        cash_by_owner: dict[tuple[str, str], Decimal] = {}
+        for strategy_id, profile in profiles.items():
+            account = self.ledger.strategy_account(strategy_id, book_id=profile.book_id)
+            if account is None:
+                raise KeyError(f"strategy account not seeded: {strategy_id}/{profile.book_id}")
+            net = ZERO
+            for row in self.ledger.shadow_positions(route_id=route_id):
+                if row["strategy_id"] == strategy_id and row["book_id"] == profile.book_id:
+                    net += Decimal(row["notional"])
+            cash_by_owner[(strategy_id, profile.book_id)] = Decimal(account["allocated_capital"]) - net
+        self.ledger.promote_shadow_route(route_id=route_id, cash_by_owner=cash_by_owner)
+        self.engine.external_authority_routes.discard(route_id)
+        strict = self.bootstrap_reconciliation()
+        return {
+            "route_id": route_id,
+            "promoted": True,
+            "cash_by_owner": {
+                f"{strategy_id}/{book_id}": str(cash)
+                for (strategy_id, book_id), cash in sorted(cash_by_owner.items())
+            },
+            "reconciliation": strict,
+        }
+
+    def shadow_cycle(self, route_id: str, *, trigger: str = "shadow-cycle") -> dict:
+        shadow = self.ledger.shadow_route(route_id)
+        if shadow is None or not shadow["active"]:
+            raise ValueError(f"route {route_id} has no active shadow mirror")
+        if self.config.routes[route_id].live_orders_enabled:
+            raise ValueError(f"route {route_id} shadow cycle requires live_orders_enabled=false")
+        profiles = self._route_profiles(route_id)
+        active_profiles = [
+            profile for _, profile in sorted(profiles.items())
+            if self.ledger.strategy_lifecycle(profile.strategy_id, book_id=profile.book_id) == "active"
+        ]
+        if not active_profiles:
+            raise ValueError(f"route {route_id} has no active strategies")
+        if len(active_profiles) > 1 and any(
+            profile.result_mode is NativeResultMode.POSITION_DELTAS for profile in active_profiles
+        ):
+            raise ValueError(
+                "shared-route shadow-cycle cannot safely capture position-delta strategies before "
+                "current ownership is known; use strategy-specific external fill attribution"
+            )
+        if len(active_profiles) == 1:
+            self.refresh_shadow_mirror(route_id, commit=True)
+
+        captures = []
+        for profile in active_profiles:
+            outcome = self.orchestrator.run(profile, trigger=trigger, defer_portfolio=True)
+            captures.append({
+                "strategy_id": profile.strategy_id,
+                "run_id": outcome.run_id,
+                "status": outcome.status,
+                "revision": outcome.revision,
+                "error": outcome.error,
+            })
+            if outcome.status != "captured":
+                return {
+                    "route_id": route_id,
+                    "status": "failed",
+                    "captures": captures,
+                    "error": f"intent capture failed for {profile.strategy_id}: {outcome.error}",
+                }
+
+        mirror = self.refresh_shadow_mirror(route_id, commit=True)
+        cycle_run_id = uuid4().hex
+        portfolio_result = self.engine.run_cycle(
+            self.orchestrator._portfolio_intents(route_id), run_id=cycle_run_id
+        )
+        return {
+            "route_id": route_id,
+            "status": portfolio_result.state.value,
+            "run_id": cycle_run_id,
+            "captures": captures,
+            "mirror": mirror,
+            "reconciled": portfolio_result.reconciled,
+            "trade_count": len(portfolio_result.deltas),
+            "trades": [
+                {
+                    "instrument": delta.instrument,
+                    "current": str(delta.current),
+                    "desired": str(delta.desired),
+                    "delta": str(delta.delta),
+                }
+                for delta in portfolio_result.deltas
+            ],
+        }
 
     def status(self) -> dict:
         runtime_by_key = {
@@ -432,6 +772,12 @@ class ConductorRuntimeApp:
                         if decision is None
                         else {key: str(value) for key, value in decision.weights.items()}
                     ),
+                    "authority": (
+                        "external_shadow"
+                        if (self.ledger.shadow_route(route_id) or {}).get("active")
+                        else "conductor"
+                    ),
+                    "shadow": self.ledger.shadow_route(route_id),
                     "risk": {
                         "max_gross_leverage": str(pool.risk.max_gross_leverage),
                         "max_net_exposure": str(pool.risk.max_net_exposure),
@@ -688,11 +1034,30 @@ class ConductorRuntimeApp:
         return result
 
     def bootstrap_reconciliation(self) -> dict:
-        quantities: dict[tuple[str, str], Decimal] = defaultdict(lambda: ZERO)
+        """Doctor check using the route's current execution authority.
+
+        External-shadow routes compare the shadow mirror to broker state and report the durable
+        virtual ledger separately as informational drift. Conductor-authority routes retain the
+        strict virtual-vs-broker invariant.
+        """
+        effective_quantities: dict[tuple[str, str], Decimal] = defaultdict(lambda: ZERO)
+        virtual_quantities: dict[tuple[str, str], Decimal] = defaultdict(lambda: ZERO)
+        authority_by_route: dict[str, str] = {}
+        for route_id in sorted(self.route_scope):
+            shadow = self.ledger.shadow_route(route_id)
+            authority_by_route[route_id] = (
+                "external_shadow" if shadow is not None and shadow["active"] else "conductor"
+            )
+        for row in self.ledger.implementation_positions(route_ids=self.route_scope):
+            effective_quantities[(row["route_id"], row["instrument"])] += Decimal(row["quantity"])
         for row in self.ledger.virtual_positions():
-            if row["route_id"] not in self.route_scope:
-                continue
-            quantities[(row["route_id"], row["instrument"])] += Decimal(row["quantity"])
+            if row["route_id"] in self.route_scope:
+                virtual_quantities[(row["route_id"], row["instrument"])] += Decimal(row["quantity"])
+
+        actual = [
+            position for position in self.engine.execution.positions()
+            if position.route_id in self.route_scope
+        ]
         desired = [
             AggregateTarget(
                 instrument=instrument,
@@ -700,16 +1065,39 @@ class ConductorRuntimeApp:
                 target=quantity,
                 notional=ZERO,
             )
-            for (route_id, instrument), quantity in sorted(quantities.items())
+            for (route_id, instrument), quantity in sorted(effective_quantities.items())
             if quantity != ZERO
         ]
-        actual = self.engine.execution.positions()
+        virtual_desired = [
+            AggregateTarget(
+                instrument=instrument,
+                route_id=route_id,
+                target=quantity,
+                notional=ZERO,
+            )
+            for (route_id, instrument), quantity in sorted(virtual_quantities.items())
+            if quantity != ZERO
+        ]
         deltas = self.engine.reconciler.reconcile(desired, actual)
+        virtual_deltas = self.engine.reconciler.reconcile(virtual_desired, actual)
         result = {
             "reconciled": not deltas,
-            "virtual_position_count": len(desired),
+            "authority_by_route": authority_by_route,
+            "implementation_position_count": len(desired),
+            "virtual_position_count": len(virtual_desired),
             "broker_position_count": len(actual),
             "differences": [
+                {
+                    "route_id": delta.route_id,
+                    "instrument": delta.instrument,
+                    "expected": str(delta.desired),
+                    "broker_actual": str(delta.current),
+                    "difference": str(delta.delta),
+                }
+                for delta in deltas
+            ],
+            "virtual_ledger_reconciled": not virtual_deltas,
+            "virtual_ledger_differences": [
                 {
                     "route_id": delta.route_id,
                     "instrument": delta.instrument,
@@ -717,10 +1105,10 @@ class ConductorRuntimeApp:
                     "broker_actual": str(delta.current),
                     "difference": str(delta.delta),
                 }
-                for delta in deltas
+                for delta in virtual_deltas
             ],
         }
-        self.ledger.append_event("bootstrap.reconciliation_checked", result)
+        self.ledger.append_event("doctor.reconciliation_checked", result)
         return result
 
     def close(self) -> None:
