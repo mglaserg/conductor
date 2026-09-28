@@ -39,11 +39,15 @@ class InverseVolAllocator:
         *,
         ewma_lambda: Decimal = Decimal("0.94"),
         min_observations: int = 20,
+        lookback_observations: int | None = None,
     ) -> None:
         if not Decimal("0") < ewma_lambda < Decimal("1"):
             raise ValueError("ewma_lambda must be between 0 and 1")
+        if lookback_observations is not None and lookback_observations < min_observations:
+            raise ValueError("lookback_observations cannot be below min_observations")
         self.ewma_lambda = ewma_lambda
         self.min_observations = min_observations
+        self.lookback_observations = lookback_observations
 
     def _ewma_vol(self, values: Sequence[Decimal]) -> Decimal:
         if len(values) < self.min_observations:
@@ -51,7 +55,8 @@ class InverseVolAllocator:
                 f"need {self.min_observations} observations, got {len(values)}"
             )
         lam = float(self.ewma_lambda)
-        returns = [float(x) for x in values]
+        window = values[-self.lookback_observations :] if self.lookback_observations else values
+        returns = [float(x) for x in window]
         mean = fmean(returns)
         variance = 0.0
         weight = 1.0
@@ -85,6 +90,7 @@ class InverseVolAllocator:
             weights,
             {
                 "ewma_lambda": str(self.ewma_lambda),
+                "lookback_observations": self.lookback_observations,
                 "volatility": {name: str(vol) for name, vol in vols.items()},
             },
         )
@@ -97,8 +103,21 @@ class ERCAllocator:
     component risk contributions are equal (or proportional to supplied budgets).
     """
 
-    def __init__(self, *, min_observations: int = 30) -> None:
+    def __init__(
+        self,
+        *,
+        min_observations: int = 30,
+        lookback_observations: int | None = None,
+        covariance_estimator: str = "ledoit_wolf",
+    ) -> None:
+        estimator = covariance_estimator.lower()
+        if estimator not in {"ledoit_wolf", "sample"}:
+            raise ValueError("covariance_estimator must be 'ledoit_wolf' or 'sample'")
+        if lookback_observations is not None and lookback_observations < min_observations:
+            raise ValueError("lookback_observations cannot be below min_observations")
         self.min_observations = min_observations
+        self.lookback_observations = lookback_observations
+        self.covariance_estimator = estimator
 
     def allocate(
         self,
@@ -121,13 +140,24 @@ class ERCAllocator:
         lengths = {len(returns[name]) for name in names}
         if len(lengths) != 1:
             raise AllocationError("ERC return histories must be aligned and equal length")
-        observations = lengths.pop()
+        available_observations = lengths.pop()
+        observations = (
+            min(available_observations, self.lookback_observations)
+            if self.lookback_observations is not None
+            else available_observations
+        )
         if observations < self.min_observations:
             raise InsufficientAllocationHistory(
                 f"need {self.min_observations} aligned observations, got {observations}"
             )
-        matrix = np.array([[float(x) for x in returns[name]] for name in names], dtype=float).T
-        covariance = LedoitWolf().fit(matrix).covariance_
+        window_start = -self.lookback_observations if self.lookback_observations else None
+        matrix = np.array(
+            [[float(x) for x in returns[name][window_start:]] for name in names], dtype=float
+        ).T
+        if self.covariance_estimator == "ledoit_wolf":
+            covariance = LedoitWolf().fit(matrix).covariance_
+        else:
+            covariance = np.atleast_2d(np.cov(matrix, rowvar=False, ddof=1))
 
         if risk_budgets is None:
             budgets = np.ones(len(names), dtype=float) / len(names)
@@ -168,7 +198,8 @@ class ERCAllocator:
             "erc",
             weights,
             {
-                "covariance": "ledoit_wolf",
+                "covariance": self.covariance_estimator,
+                "lookback_observations": self.lookback_observations,
                 "risk_contributions": {
                     name: str(float(shares[index])) for index, name in enumerate(names)
                 },
@@ -197,6 +228,7 @@ class FallbackAllocator:
         *,
         configured: Mapping[str, Decimal],
         returns: Mapping[str, Sequence[Decimal]] | None = None,
+        risk_budgets: Mapping[str, Decimal] | None = None,
         fallback_order: Sequence[str] | None = None,
     ) -> AllocationDecision:
         requested = method.lower()
@@ -220,11 +252,11 @@ class FallbackAllocator:
                 elif candidate == "inverse_vol":
                     if returns is None:
                         raise InsufficientAllocationHistory("no return history")
-                    decision = self.inverse_vol.allocate(returns)
+                    decision = self.inverse_vol.allocate(returns, risk_budgets=risk_budgets)
                 else:
                     if returns is None:
                         raise InsufficientAllocationHistory("no return history")
-                    decision = self.erc.allocate(returns)
+                    decision = self.erc.allocate(returns, risk_budgets=risk_budgets)
             except AllocationError as exc:
                 failures.append((candidate, str(exc)))
                 continue

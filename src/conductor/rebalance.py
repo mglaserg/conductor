@@ -13,6 +13,7 @@ from conductor.domain.models import (
     VirtualTarget,
 )
 from conductor.ledger import ConductorLedger
+from conductor.policy import StrategyPolicy
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +27,8 @@ class RebalanceBandDecision:
     desired_quantity: Decimal
     delta_notional: Decimal
     suppressed: bool
+    scope: str = "sleeve"
+    strategy_id: str | None = None
 
 
 class VirtualRebalanceBuffer:
@@ -42,10 +45,12 @@ class VirtualRebalanceBuffer:
         ledger: ConductorLedger,
         allocations: Mapping[str, SleeveAllocation],
         instruments: dict[str, InstrumentSpec],
+        strategy_policies: Mapping[str, StrategyPolicy] | None = None,
     ) -> None:
         self.ledger = ledger
         self.allocations = dict(allocations)
         self.instruments = instruments
+        self.strategy_policies = dict(strategy_policies or {})
 
     def _sleeve_capital(self, sleeve_id: str, route_id: str) -> Decimal:
         configured = self.allocations.get(sleeve_id)
@@ -83,18 +88,79 @@ class VirtualRebalanceBuffer:
             for row in current_rows
         }
 
+        decisions: list[RebalanceBandDecision] = []
+        strategy_adjusted = dict(desired_by_key)
+        # Strategy deadbands are evaluated against that strategy's own allocated capital before
+        # sleeve aggregation or cross-strategy netting. This prevents one strategy's large move
+        # from dragging another strategy's microscopic rebalance through the broker.
+        for key in sorted(set(desired_by_key) | set(current_by_key)):
+            strategy_id, book_id, sleeve_id, route_id, instrument = key
+            policy = self.strategy_policies.get(strategy_id)
+            band = ZERO if policy is None else policy.rebalance_band
+            if band <= ZERO:
+                continue
+            account = self.ledger.strategy_account(strategy_id, book_id=book_id)
+            capital_base = ZERO if account is None else Decimal(account["allocated_capital"])
+            if capital_base <= ZERO:
+                raise ValueError(
+                    f"rebalance band configured for {strategy_id}/{book_id} "
+                    "but allocated capital is zero"
+                )
+            current_qty = current_by_key.get(key, ZERO)
+            desired_row = desired_by_key.get(key)
+            desired_qty = ZERO if desired_row is None else desired_row.target
+            spec = self.instruments[instrument]
+            delta_notional = (desired_qty - current_qty) * spec.unit_notional
+            suppressed = abs(delta_notional) / capital_base < band
+            decisions.append(
+                RebalanceBandDecision(
+                    sleeve_id=sleeve_id,
+                    route_id=route_id,
+                    instrument=instrument,
+                    band=band,
+                    capital_base=capital_base,
+                    current_quantity=current_qty,
+                    desired_quantity=desired_qty,
+                    delta_notional=delta_notional,
+                    suppressed=suppressed,
+                    scope="strategy",
+                    strategy_id=strategy_id,
+                )
+            )
+            if not suppressed:
+                continue
+            if current_qty == ZERO:
+                strategy_adjusted.pop(key, None)
+                continue
+            strategy_adjusted[key] = VirtualTarget(
+                strategy_id=strategy_id,
+                book_id=book_id,
+                sleeve_id=sleeve_id,
+                route_id=route_id,
+                instrument=instrument,
+                target=current_qty,
+                notional=current_qty * spec.unit_notional,
+                exposure_type=ExposureType.QUANTITY,
+                source_exposure_type=ExposureType.QUANTITY,
+                lot_size=spec.lot_size,
+            )
+
         groups: dict[tuple[str, str, str], set[tuple[str, str, str, str, str]]] = defaultdict(set)
-        for key in set(desired_by_key) | set(current_by_key):
+        for key in set(strategy_adjusted) | set(current_by_key):
             groups[(key[2], key[3], key[4])].add(key)
 
         implemented: list[VirtualTarget] = []
-        decisions: list[RebalanceBandDecision] = []
         for (sleeve_id, route_id, instrument), keys in sorted(groups.items()):
             allocation = self.allocations.get(sleeve_id)
             band = ZERO if allocation is None else allocation.rebalance_band
             current_qty = sum((current_by_key.get(key, ZERO) for key in keys), ZERO)
             desired_qty = sum(
-                (desired_by_key[key].target if key in desired_by_key else ZERO for key in keys),
+                (
+                    strategy_adjusted[key].target
+                    if key in strategy_adjusted
+                    else ZERO
+                    for key in keys
+                ),
                 ZERO,
             )
             spec = self.instruments[instrument]
@@ -121,7 +187,9 @@ class VirtualRebalanceBuffer:
 
             if not suppressed:
                 implemented.extend(
-                    desired_by_key[key] for key in sorted(keys) if key in desired_by_key
+                    strategy_adjusted[key]
+                    for key in sorted(keys)
+                    if key in strategy_adjusted
                 )
                 continue
 

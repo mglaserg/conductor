@@ -65,3 +65,33 @@ def test_rps_absolute_quantities_are_not_diffed() -> None:
         run_id="rps2",
     )
     assert intent.targets["EQ.US.AAPL"] == Decimal("35")
+
+
+def test_native_result_preserves_scalar_strategy_metadata_for_policy_inputs() -> None:
+    p = StrategyRunnerProfile(
+        strategy_id="ETSA",
+        sleeve_id="equities",
+        result_mode=NativeResultMode.TARGET_WEIGHTS,
+        command=("python", "strategy.py"),
+        cwd=Path("."),
+        route_id="ibkr_main",
+    )
+    account = StrategyAccountView(
+        strategy_id="ETSA",
+        book_id="main",
+        allocated_capital=Decimal("100000"),
+        cash=Decimal("100000"),
+        positions={},
+        equity=Decimal("100000"),
+        gross_exposure=Decimal("0"),
+        net_exposure=Decimal("0"),
+    )
+    intent = adapt_native_result(
+        {"targets": {"AAPL": "0.5"}, "metadata": {"annualized_volatility": 0.2}},
+        profile=p,
+        account=account,
+        revision=1,
+        run_id="run-1",
+    )
+    assert intent.metadata["annualized_volatility"] == "0.2"
+    assert intent.metadata["producer"] == "conductor-runtime"

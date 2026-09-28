@@ -118,6 +118,16 @@ reconciliation is clean.
 **Reason:** multi-day shadow testing needs current externally implemented state without fabricating
 Conductor fills or erasing the distinction between desired, observed, and owned state.
 
+## S15 — Policy preserves ownership before broker netting
+
+Strategy policy, target-volatility scaling, risk budgets, and rebalance deadbands operate on each
+strategy's virtual targets before same-route broker aggregation. A synthetic `conductor-hold-current`
+intent is policy-invariant: one strategy's run may not rescale or flatten another strategy merely
+because that companion strategy did not run in the same cycle.
+
+**Reason:** portfolio policy may change desired risk, but it must not manufacture an ownership
+transfer between strategies that share a broker account.
+
 ## Change-review checklist
 
 For every execution, accounting, routing, lifecycle, or persistence change, reviewers should answer:
@@ -132,6 +142,7 @@ For every execution, accounting, routing, lifecycle, or persistence change, revi
 8. Can a strategy run touch, flatten, or borrow capital from an unrelated route/account?
 9. Does a worker prove it is connected to the configured broker account?
 10. Is rollback possible without deleting evidence?
+11. Can policy scaling or a rebalance deadband mutate another strategy's hold-current ownership?
 
 The operational failure drills in `docs/WINDOWS_ETSA_RPS_TLAQ_MIGRATION.md` are the current concrete
 acceptance suite for these invariants.

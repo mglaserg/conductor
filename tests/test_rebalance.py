@@ -78,3 +78,28 @@ def test_sleeve_band_allows_full_strategy_targets_when_threshold_is_crossed(tmp_
     got = {row.strategy_id: row.target for row in implemented}
     assert got == {"ETSA": Decimal("130"), "RPSchteroids": Decimal("60")}
     assert decisions[0].suppressed is False
+
+
+def test_strategy_band_is_scaled_to_strategy_capital_before_sleeve_netting(tmp_path) -> None:
+    from conductor.policy import StrategyPolicy
+
+    ledger = ConductorLedger(tmp_path / "strategy-band.sqlite")
+    _seed(ledger)
+    buffer = VirtualRebalanceBuffer(
+        ledger=ledger,
+        allocations={},
+        instruments={"EQ.US.AAPL": InstrumentSpec("EQ.US.AAPL", Decimal("100"))},
+        strategy_policies={
+            "ETSA": StrategyPolicy("ETSA", rebalance_band=Decimal("0.025")),
+            "RPSchteroids": StrategyPolicy("RPSchteroids"),
+        },
+    )
+
+    # ETSA's +1 share is only $100 / $85k of its own capital and is suppressed.
+    # RPS's +20 shares are untouched. The decisions happen before the two books net.
+    implemented, decisions = buffer.apply([_target("ETSA", "101"), _target("RPSchteroids", "70")])
+    got = {row.strategy_id: row.target for row in implemented}
+    assert got == {"ETSA": Decimal("100"), "RPSchteroids": Decimal("70")}
+    strategy_decision = next(row for row in decisions if row.scope == "strategy")
+    assert strategy_decision.strategy_id == "ETSA"
+    assert strategy_decision.suppressed is True

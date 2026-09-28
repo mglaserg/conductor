@@ -300,7 +300,7 @@ def main() -> None:
             if args.command == "doctor":
                 result = app.bootstrap_reconciliation()
                 print(json.dumps(result, indent=2, sort_keys=True))
-                if not result["reconciled"]:
+                if not result.get("healthy", result["reconciled"]):
                     raise SystemExit(3)
                 return
             if args.command == "shadow-cycle":

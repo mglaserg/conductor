@@ -1,6 +1,6 @@
 # Conductor project status
 
-Last reviewed: **2026-09-25**
+Last reviewed: **2026-09-28**
 
 This is the canonical handoff document for the repository's current state. `ROADMAP.md` describes
 where the product is going; this file describes what is true now and what should happen next.
@@ -46,9 +46,12 @@ cutover checklist in `docs/WINDOWS_ETSA_RPS_TLAQ_MIGRATION.md` are satisfied.
 - broker `NetLiquidation` as the default live/shadow NAV source independently for each route;
 - exact-account direct IB `reqAccountSummary(NetLiquidation)` fallback when Nautilus has the right
   account but no usable NAV, with off-loop refresh, staleness expiry and strict account filtering;
-- per-pool static/inverse-vol/ERC selection and deterministic fallback configuration;
+- per-pool static/inverse-vol/ERC selection and deterministic fallback configuration, with strategy risk-budget inputs and selectable Ledoit-Wolf/sample covariance for ERC;
 - allocator-derived strategy capital budgets refreshed from each route's NAV;
+- explicit versioned strategy policy plus a composed portfolio-policy stage for opt-in native-vol scaling, target freshness, strategy leverage/concentration constraints, and capital-scaled strategy deadbands;
+- strategy result scalar metadata can feed policy inputs without changing the frozen target protocol;
 - per-route gross, net and single-instrument risk scaling;
+- persisted `portfolio.decision_lineage` evidence from translated per-strategy targets through policy/risk/deadband stages to aggregate broker targets and planned deltas;
 - per-route trade-size/dust thresholds;
 - route-scoped strategy startup/reconciliation so an unrelated account worker is not a dependency
   of another account's strategy run;
@@ -88,7 +91,7 @@ paper, shadow, or production validation.
 
 ## Verification state
 
-- Full automated suite on 2026-09-24: **94 passed**.
+- Full automated suite on 2026-09-28: **115 passed** in local verification.
 - New multi-account coverage verifies:
   - independent broker NAVs and 85/15 + 100% strategy budgeting;
   - exact strategy membership/weight validation per route;
@@ -104,6 +107,9 @@ paper, shadow, or production validation.
     native account, including rejection of other-account and conflicting-account-summary values;
   - account-balance fallback and fail-closed behavior when the configured IB account is not the
     account registered in Nautilus.
+- New policy coverage verifies strategy leverage scaling, target-volatility metadata, fail-closed
+  missing/stale policy inputs, hold-current invariance on shared routes, per-strategy deadbands,
+  selectable sample covariance, and persisted decision lineage.
 - Existing tests continue to cover protocol, ledger, portfolio construction, accounting,
   orchestration, bridge behavior, failure handling, paper runtime and reconciliation.
 - `live_orders_enabled = false` remains the required default in the Windows configuration.
@@ -150,8 +156,12 @@ Never summarize the current state as production-ready.
    proof.
 8. Runtime allocator history is not yet wired to attributable strategy return history, so
    inverse-vol/ERC configured in the live runtime currently rely on fallback when history is absent.
-9. Repository-wide Ruff debt predates this change and still needs an intentional cleanup pass.
-10. A broker/account move is deliberately not automated. Physical transfer/re-establishment and
+   Strategy risk budgets and covariance selection are wired, but dynamic allocation should not be
+   promoted until those histories are clean and attributable.
+9. Target-volatility scaling is implemented but opt-in; a strategy must emit the configured scalar
+   volatility metadata key. Missing required volatility blocks by default.
+10. Repository-wide Ruff debt predates this change and still needs an intentional cleanup pass.
+11. A broker/account move is deliberately not automated. Physical transfer/re-establishment and
     virtual-book migration/bootstrap must be reviewed explicitly before changing a persisted route.
 
 ## Next work, in priority order

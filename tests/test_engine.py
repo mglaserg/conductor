@@ -164,3 +164,30 @@ def test_engine_batch_warms_route_universe_before_portfolio_build() -> None:
     engine.run_cycle(intents)
 
     assert execution.warmed == [{"ibkr_main": {"AAPL", "TLT"}}]
+
+
+def test_engine_persists_full_portfolio_decision_lineage(tmp_path) -> None:
+    nav = Decimal("100000")
+    instruments = {"AAPL": InstrumentSpec("AAPL", Decimal("100"))}
+    ledger = ConductorLedger(tmp_path / "lineage.sqlite")
+    engine = ConductorEngine(
+        portfolio=PortfolioBuilder(instruments=instruments, portfolio_nav=nav),
+        reconciler=DesiredStateReconciler(),
+        execution=PaperExecutionAdapter([]),
+        risk=PortfolioRiskEngine(nav),
+        order_planner=OrderPlanner(portfolio_nav=nav, instruments=instruments),
+        ledger=ledger,
+    )
+    intent = StrategyIntent(
+        "ETSA", {"AAPL": Decimal("10")}, ExposureType.QUANTITY, sleeve_id="equities"
+    )
+
+    engine.run_cycle([intent])
+
+    lineage = [
+        event for event in ledger.events() if event["event_type"] == "portfolio.decision_lineage"
+    ]
+    assert len(lineage) == 1
+    assert '"raw_strategy_targets"' in lineage[0]["payload_json"]
+    assert '"aggregate_broker_targets"' in lineage[0]["payload_json"]
+    assert '"planned_deltas"' in lineage[0]["payload_json"]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
@@ -9,7 +10,12 @@ from conductor.accounting import VirtualAccountingEngine
 from conductor.adapters.nautilus_bridge import NautilusBridgeExecutionAdapter
 from conductor.adapters.paper import DurablePaperExecutionAdapter, PaperExecutionAdapter
 from conductor.adapters.router import RoutedExecutionAdapter
-from conductor.allocation import AllocationDecision, FallbackAllocator
+from conductor.allocation import (
+    AllocationDecision,
+    ERCAllocator,
+    FallbackAllocator,
+    InverseVolAllocator,
+)
 from conductor.config import PortfolioConfig, RuntimeConfig, load_runtime_config
 from conductor.domain.models import (
     ZERO,
@@ -21,6 +27,8 @@ from conductor.domain.models import (
 from conductor.engine import ConductorEngine
 from conductor.ledger import ConductorLedger
 from conductor.orders import OrderPlanner
+from conductor.policy import StrategyPolicyEngine
+from conductor.portfolio_policy import PortfolioPolicyEngine
 from conductor.portfolio import PortfolioBuilder
 from conductor.rebalance import VirtualRebalanceBuffer
 from conductor.reconcile import DesiredStateReconciler
@@ -173,16 +181,32 @@ class ConductorRuntimeApp:
             route_id: self._pool(route_id).risk.max_instrument_nav
             for route_id in self.portfolio_navs
         }
+        risk_engine = PortfolioRiskEngine(
+            self.portfolio_navs,
+            max_gross_leverage=gross_limits,
+            max_net_exposure=net_limits,
+            max_instrument_nav=instrument_limits,
+        )
+        rebalance_buffer = VirtualRebalanceBuffer(
+            ledger=self.ledger,
+            allocations=config.allocations,
+            instruments=self.portfolio.instruments,
+            strategy_policies=config.strategy_policies,
+        )
+        strategy_policy = StrategyPolicyEngine(
+            config.strategy_policies,
+            capital_provider=strategy_capital,
+        )
+        portfolio_policy = PortfolioPolicyEngine(
+            strategy_policy=strategy_policy,
+            risk=risk_engine,
+            rebalance_buffer=rebalance_buffer,
+        )
         self.engine = ConductorEngine(
             portfolio=self.portfolio,
             reconciler=DesiredStateReconciler(),
             execution=execution,
-            risk=PortfolioRiskEngine(
-                self.portfolio_navs,
-                max_gross_leverage=gross_limits,
-                max_net_exposure=net_limits,
-                max_instrument_nav=instrument_limits,
-            ),
+            risk=risk_engine,
             order_planner=OrderPlanner(
                 portfolio_nav=self.portfolio_navs,
                 instruments=self.portfolio.instruments,
@@ -191,11 +215,9 @@ class ConductorRuntimeApp:
             ),
             ledger=self.ledger,
             accounting=self.accounting,
-            rebalance_buffer=VirtualRebalanceBuffer(
-                ledger=self.ledger,
-                allocations=config.allocations,
-                instruments=self.portfolio.instruments,
-            ),
+            rebalance_buffer=rebalance_buffer,
+            strategy_policy=strategy_policy,
+            portfolio_policy=portfolio_policy,
             external_authority_routes={
                 row["route_id"]
                 for row in self.ledger.shadow_routes(active_only=True)
@@ -263,10 +285,32 @@ class ConductorRuntimeApp:
         for route_id, pool in self.portfolios_by_route.items():
             if not pool.static_weights:
                 continue
-            decisions[route_id] = FallbackAllocator().allocate(
+            route_strategies = {
+                strategy_id
+                for strategy_id, profile in self.config.strategies.items()
+                if profile.route_id == route_id
+            }
+            risk_budgets = {
+                strategy_id: self.config.strategy_policies[strategy_id].risk_budget
+                for strategy_id in route_strategies
+            }
+            allocator = FallbackAllocator(
+                inverse_vol=InverseVolAllocator(
+                    ewma_lambda=pool.inverse_vol_ewma_lambda,
+                    min_observations=pool.inverse_vol_min_observations,
+                    lookback_observations=pool.inverse_vol_lookback_observations,
+                ),
+                erc=ERCAllocator(
+                    min_observations=pool.erc_min_observations,
+                    lookback_observations=pool.erc_lookback_observations,
+                    covariance_estimator=pool.covariance_estimator,
+                ),
+            )
+            decisions[route_id] = allocator.allocate(
                 pool.allocator,
                 configured=pool.static_weights,
                 returns=None,
+                risk_budgets=risk_budgets,
                 fallback_order=pool.fallback_order,
             )
         return decisions
@@ -753,6 +797,7 @@ class ConductorRuntimeApp:
                     "positions": {k: str(v) for k, v in account.positions.items()},
                     "target_revision": None if current is None else current.revision,
                     "target_as_of": None if current is None else current.as_of.isoformat(),
+                    "policy": self._strategy_policy_status(strategy_id),
                 }
             )
 
@@ -771,6 +816,9 @@ class ConductorRuntimeApp:
                         {}
                         if decision is None
                         else {key: str(value) for key, value in decision.weights.items()}
+                    ),
+                    "allocation_diagnostics": (
+                        {} if decision is None else dict(decision.diagnostics)
                     ),
                     "authority": (
                         "external_shadow"
@@ -805,6 +853,29 @@ class ConductorRuntimeApp:
                 for position in self.engine.execution.positions()
             ]
         return payload
+
+    def _strategy_policy_status(self, strategy_id: str) -> dict:
+        policy = self.config.strategy_policies[strategy_id]
+        return {
+            "version": policy.version,
+            "source": policy.source,
+            "risk_budget": str(policy.risk_budget),
+            "target_volatility": (
+                None if policy.target_volatility is None else str(policy.target_volatility)
+            ),
+            "volatility_metadata_key": policy.volatility_metadata_key,
+            "min_vol_scale": str(policy.min_vol_scale),
+            "max_vol_scale": str(policy.max_vol_scale),
+            "max_gross_leverage": (
+                None if policy.max_gross_leverage is None else str(policy.max_gross_leverage)
+            ),
+            "max_position_nav": (
+                None if policy.max_position_nav is None else str(policy.max_position_nav)
+            ),
+            "rebalance_band": str(policy.rebalance_band),
+            "max_target_age_seconds": policy.max_target_age_seconds,
+            "on_missing_volatility": policy.on_missing_volatility.value,
+        }
 
     def bootstrap_route_ownership(
         self,
@@ -1080,8 +1151,75 @@ class ConductorRuntimeApp:
         ]
         deltas = self.engine.reconciler.reconcile(desired, actual)
         virtual_deltas = self.engine.reconciler.reconcile(virtual_desired, actual)
+        runtime_intents = {
+            (intent.strategy_id, intent.book_id): intent for intent in self.ledger.runtime_intents()
+        }
+        policy_diagnostics: list[dict] = []
+        blocking_issues: list[str] = []
+        now = datetime.now(timezone.utc)
+        for strategy_id, profile in sorted(self.config.strategies.items()):
+            if profile.route_id not in self.route_scope:
+                continue
+            policy = self.config.strategy_policies[strategy_id]
+            intent = runtime_intents.get((strategy_id, profile.book_id))
+            issues: list[str] = []
+            state = "ready"
+            if intent is None:
+                state = "no_intent"
+            else:
+                if policy.max_target_age_seconds is not None:
+                    age = max(0.0, (now - intent.as_of).total_seconds())
+                    if age > policy.max_target_age_seconds:
+                        issues.append(
+                            f"stale target {age:.1f}s > {policy.max_target_age_seconds}s"
+                        )
+                if policy.target_volatility is not None:
+                    raw_vol = intent.metadata.get(policy.volatility_metadata_key)
+                    if raw_vol is None and policy.on_missing_volatility.value == "block":
+                        issues.append(
+                            f"missing volatility metadata {policy.volatility_metadata_key!r}"
+                        )
+            if issues:
+                state = "blocked"
+                blocking_issues.extend(
+                    f"{strategy_id}/{profile.book_id}: {issue}" for issue in issues
+                )
+            policy_diagnostics.append(
+                {
+                    "strategy_id": strategy_id,
+                    "book_id": profile.book_id,
+                    "route_id": profile.route_id,
+                    "state": state,
+                    "issues": issues,
+                    "policy": self._strategy_policy_status(strategy_id),
+                }
+            )
+
+        allocation_diagnostics = []
+        warnings: list[str] = []
+        for route_id, pool in sorted(self.portfolios_by_route.items()):
+            decision = self.allocation_decisions.get(route_id)
+            allocation_diagnostics.append(
+                {
+                    "route_id": route_id,
+                    "configured_allocator": pool.allocator,
+                    "resolved_allocator": None if decision is None else decision.method,
+                    "covariance_estimator": pool.covariance_estimator,
+                    "diagnostics": {} if decision is None else dict(decision.diagnostics),
+                }
+            )
+            if decision is not None and decision.method != pool.allocator:
+                warnings.append(
+                    f"{route_id}: allocator fell back from {pool.allocator} to {decision.method}"
+                )
+            if pool.risk.max_margin_utilization is not None:
+                warnings.append(
+                    f"{route_id}: max_margin_utilization is configured but not yet enforced"
+                )
+
         result = {
             "reconciled": not deltas,
+            "healthy": not deltas and not blocking_issues,
             "authority_by_route": authority_by_route,
             "implementation_position_count": len(desired),
             "virtual_position_count": len(virtual_desired),
@@ -1107,6 +1245,10 @@ class ConductorRuntimeApp:
                 }
                 for delta in virtual_deltas
             ],
+            "strategy_policy_diagnostics": policy_diagnostics,
+            "allocation_diagnostics": allocation_diagnostics,
+            "blocking_issues": blocking_issues,
+            "warnings": warnings,
         }
         self.ledger.append_event("doctor.reconciliation_checked", result)
         return result

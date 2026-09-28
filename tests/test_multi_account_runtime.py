@@ -551,3 +551,60 @@ def test_bootstrap_manifest_must_sum_exactly_to_broker(tmp_path, monkeypatch) ->
         ]
     finally:
         app.close()
+
+
+def test_strategy_policy_and_covariance_settings_are_parsed(tmp_path) -> None:
+    path = _multi_account_config(tmp_path)
+    text = path.read_text(encoding="utf-8")
+    text = text.replace(
+        '[portfolio.ibkr_main]\nallocator = "static"\n',
+        '[portfolio.ibkr_main]\nallocator = "static"\n'
+        '[portfolio.ibkr_main.erc]\ncovariance = "sample"\n'
+        'min_observations = 45\nlookback_days = 90\n',
+    )
+    text = text.replace(
+        'command = ' + json.dumps([sys.executable, str(tmp_path / "etsa.py")]) + '\n'
+        '[strategies.ETSA.seed]\n',
+        'command = ' + json.dumps([sys.executable, str(tmp_path / "etsa.py")]) + '\n'
+        'max_gross_leverage = 1.75\n'
+        '[strategies.ETSA.policy]\nrisk_budget = 2\nrebalance_band = 0.01\n'
+        '[strategies.ETSA.seed]\n',
+    )
+    path.write_text(text, encoding="utf-8")
+
+    config = load_runtime_config(path)
+
+    assert config.portfolios["ibkr_main"].covariance_estimator == "sample"
+    assert config.portfolios["ibkr_main"].erc_min_observations == 45
+    assert config.portfolios["ibkr_main"].erc_lookback_observations == 90
+    assert config.strategy_policies["ETSA"].risk_budget == Decimal("2")
+    assert config.strategy_policies["ETSA"].max_gross_leverage == Decimal("1.75")
+    assert config.strategy_policies["ETSA"].rebalance_band == Decimal("0.01")
+
+def test_doctor_blocks_missing_required_policy_metadata(tmp_path, monkeypatch) -> None:
+    config_path = _multi_account_config(tmp_path)
+    text = config_path.read_text(encoding="utf-8")
+    text = text.replace(
+        "[strategies.ETSA.seed]\n",
+        "[strategies.ETSA.policy]\ntarget_volatility = 0.10\n"
+        "volatility_metadata_key = \"annualized_volatility\"\n"
+        "[strategies.ETSA.seed]\n",
+    )
+    config_path.write_text(text, encoding="utf-8")
+
+    def fake_adapter(**kwargs):
+        return _FakeLiveAdapter(kwargs["route_id"], Decimal("100000"), {})
+
+    monkeypatch.setattr("conductor.runtime.app.NautilusBridgeExecutionAdapter", fake_adapter)
+    app = ConductorRuntimeApp.from_path(config_path, route_scope={"ibkr_main"})
+    try:
+        app.ledger.replace_runtime_intent(
+            StrategyIntent("ETSA", {"AAPL": Decimal("0.1")}, route_id="ibkr_main"),
+            run_id="etsa-no-vol",
+        )
+        doctor = app.bootstrap_reconciliation()
+        assert doctor["reconciled"] is True
+        assert doctor["healthy"] is False
+        assert any("missing volatility metadata" in issue for issue in doctor["blocking_issues"])
+    finally:
+        app.close()

@@ -49,8 +49,11 @@ Windows equity strategies without rewriting their strategy logic.
 - immediate conversion of deltas to absolute desired state;
 - virtual strategy accounts, positions, allocated capital, and negative cash;
 - internal crossing and residual broker-level netting;
-- static, inverse-volatility, ERC, and deterministic fallback allocators;
-- sleeve rebalance bands plus portfolio gross and single-instrument caps;
+- static, inverse-volatility, ERC, and deterministic fallback allocators, with strategy risk-budget inputs and selectable Ledoit-Wolf/sample covariance for ERC;
+- explicit versioned `StrategyPolicy` plus `PortfolioPolicyEngine`, including opt-in native-vol scaling, strategy leverage/concentration limits, freshness rules, and fail-closed missing-volatility behavior;
+- strategy- and sleeve-level capital-scaled rebalance bands plus portfolio gross and single-instrument caps;
+- persisted end-to-end portfolio decision lineage from translated strategy targets through policy, risk, implementation buffering, aggregate broker targets and planned deltas;
+- policy/allocator diagnostics surfaced through `status` and authority-aware `doctor`;
 - route-aware execution and a persistent SQLite/WAL Nautilus bridge;
 - one worker/bridge state boundary per IBKR account, with configured-vs-reported account-ID fail-closed checks;
 - route-scoped strategy runtime startup so an unrelated account worker outage does not block another account;
@@ -154,8 +157,8 @@ the same Conductor ownership and audit invariants.
 
 - attributable strategy NAV, P&L, cash flow, exposure, turnover, and drawdown histories;
 - allocator inputs derived from clean strategy-level histories rather than aggregate account data;
-- governed promotion from static allocation to inverse-volatility or ERC/risk budgets;
-- covariance/data-quality diagnostics and explicit fallback evidence;
+- governed promotion from static allocation to inverse-volatility or ERC/risk budgets (policy/risk-budget plumbing exists; automatic history feed remains queued);
+- covariance/data-quality diagnostics and explicit fallback evidence (Ledoit-Wolf/sample selection and fallback evidence are implemented; richer data-quality gates remain queued);
 - net exposure, margin utilization, liquidity, concentration, and asset-class limits;
 - allocation rebalance scheduling, turnover controls, and before/after attribution;
 - scenario and stress testing with audited operator overrides.

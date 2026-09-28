@@ -10,6 +10,8 @@ from conductor.adapters.base import ExecutionAdapter
 from conductor.domain.models import RunResult, RunState, StrategyIntent, TradeDelta
 from conductor.ledger import ConductorLedger
 from conductor.orders import OrderPlanner
+from conductor.policy import StrategyPolicyEngine
+from conductor.portfolio_policy import PortfolioPolicyEngine
 from conductor.portfolio import IntentBook, PortfolioBuilder
 from conductor.rebalance import VirtualRebalanceBuffer
 from conductor.reconcile import DesiredStateReconciler
@@ -29,6 +31,8 @@ class ConductorEngine:
     ledger: ConductorLedger | None = None
     accounting: VirtualAccountingEngine | None = None
     rebalance_buffer: VirtualRebalanceBuffer | None = None
+    strategy_policy: StrategyPolicyEngine | None = None
+    portfolio_policy: PortfolioPolicyEngine | None = None
     external_authority_routes: set[str] = field(default_factory=set)
 
     def run_cycle(
@@ -45,13 +49,59 @@ class ConductorEngine:
                     continue
                 route_instruments[intent.route_id].update(intent.targets)
             warm(route_instruments)
-        desired_virtual = self.portfolio.build_virtual_targets(resolved)
-        desired_virtual, risk_decision = self.risk.apply(desired_virtual)
+        raw_virtual = self.portfolio.build_virtual_targets(resolved)
+        if self.portfolio_policy is not None:
+            policy_result = self.portfolio_policy.apply(
+                raw_virtual, resolved, route_ids=active_routes
+            )
+            policy_virtual = policy_result.policy_adjusted
+            desired_virtual = policy_result.risk_adjusted
+            implemented_virtual = policy_result.implemented
+            policy_decisions = policy_result.strategy_decisions
+            risk_decision = policy_result.risk_decision
+            band_decisions = policy_result.rebalance_decisions
+        else:
+            if self.strategy_policy is not None:
+                policy_virtual, policy_decisions = self.strategy_policy.apply(raw_virtual, resolved)
+            else:
+                policy_virtual, policy_decisions = raw_virtual, []
+            desired_virtual, risk_decision = self.risk.apply(policy_virtual)
+            if self.rebalance_buffer is not None:
+                implemented_virtual, band_decisions = self.rebalance_buffer.apply(
+                    desired_virtual, route_ids=active_routes
+                )
+            else:
+                implemented_virtual, band_decisions = desired_virtual, []
 
         if self.ledger:
-            # Virtual targets mean desired/risk-adjusted economic state. Implemented
+            # Virtual targets mean desired/policy/risk-adjusted economic state. Implemented
             # ownership can differ temporarily because of explicit rebalance bands.
             self.ledger.replace_virtual_targets(desired_virtual, route_ids=active_routes)
+            for decision in policy_decisions:
+                self.ledger.append_event(
+                    "strategy.policy_decision",
+                    {
+                        "run_id": run_id,
+                        "strategy_id": decision.strategy_id,
+                        "book_id": decision.book_id,
+                        "route_id": decision.route_id,
+                        "policy_version": decision.policy_version,
+                        "policy_source": decision.policy_source,
+                        "gross_before": str(decision.gross_before),
+                        "gross_after": str(decision.gross_after),
+                        "largest_position_before": str(decision.largest_position_before),
+                        "capital_base": str(decision.capital_base),
+                        "observed_volatility": (
+                            None
+                            if decision.observed_volatility is None
+                            else str(decision.observed_volatility)
+                        ),
+                        "volatility_scale": str(decision.volatility_scale),
+                        "constraint_scale": str(decision.constraint_scale),
+                        "total_scale": str(decision.total_scale),
+                        "reason": decision.reason,
+                    },
+                )
             self.ledger.append_event(
                 "risk_decision",
                 {
@@ -69,12 +119,6 @@ class ConductorEngine:
                 },
             )
 
-        if self.rebalance_buffer is not None:
-            implemented_virtual, band_decisions = self.rebalance_buffer.apply(
-                desired_virtual, route_ids=active_routes
-            )
-        else:
-            implemented_virtual, band_decisions = desired_virtual, []
         metrics = self.portfolio.metrics(implemented_virtual, route_ids=active_routes)
         if self.ledger and band_decisions:
             for decision in band_decisions:
@@ -91,6 +135,8 @@ class ConductorEngine:
                         "desired_quantity": str(decision.desired_quantity),
                         "delta_notional": str(decision.delta_notional),
                         "suppressed": decision.suppressed,
+                        "scope": decision.scope,
+                        "strategy_id": decision.strategy_id,
                     },
                 )
 
@@ -118,6 +164,51 @@ class ConductorEngine:
                             "estimated_notional": str(d.estimated_notional),
                         }
                         for d in deltas
+                    ],
+                },
+            )
+
+        if self.ledger:
+            def target_payload(rows):
+                return [
+                    {
+                        "strategy_id": row.strategy_id,
+                        "book_id": row.book_id,
+                        "route_id": row.route_id,
+                        "instrument": row.instrument,
+                        "quantity": str(row.target),
+                        "notional": str(row.notional),
+                    }
+                    for row in rows
+                ]
+
+            self.ledger.append_event(
+                "portfolio.decision_lineage",
+                {
+                    "run_id": run_id,
+                    "raw_strategy_targets": target_payload(raw_virtual),
+                    "policy_adjusted_targets": target_payload(policy_virtual),
+                    "risk_adjusted_targets": target_payload(desired_virtual),
+                    "implemented_targets": target_payload(implemented_virtual),
+                    "aggregate_broker_targets": [
+                        {
+                            "route_id": row.route_id,
+                            "instrument": row.instrument,
+                            "quantity": str(row.target),
+                            "notional": str(row.notional),
+                        }
+                        for row in aggregate
+                    ],
+                    "planned_deltas": [
+                        {
+                            "route_id": row.route_id,
+                            "instrument": row.instrument,
+                            "current": str(row.current),
+                            "desired": str(row.desired),
+                            "delta": str(row.delta),
+                            "estimated_notional": str(row.estimated_notional),
+                        }
+                        for row in deltas
                     ],
                 },
             )

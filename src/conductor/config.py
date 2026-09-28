@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from conductor.domain.models import SleeveAllocation
+from conductor.policy import MissingVolatilityBehavior, StrategyPolicy
 from conductor.routing import ExecutionRoute, RouteRegistry
 from conductor.runtime.models import NativeResultMode, StrategyRunnerProfile
 
@@ -57,6 +58,12 @@ class PortfolioConfig:
     nav_source: str = "broker"
     fixed_nav: Decimal | None = None
     fallback_order: tuple[str, ...] = ("erc", "inverse_vol", "static")
+    inverse_vol_ewma_lambda: Decimal = Decimal("0.94")
+    inverse_vol_min_observations: int = 20
+    inverse_vol_lookback_observations: int | None = None
+    erc_min_observations: int = 30
+    erc_lookback_observations: int | None = None
+    covariance_estimator: str = "ledoit_wolf"
     risk: PortfolioRiskConfig | None = None
 
 
@@ -90,6 +97,7 @@ class RuntimeConfig:
     seeds: dict[str, StrategySeed]
     paper_seeds: dict[str, PaperStrategySeed]
     allocations: dict[str, SleeveAllocation]
+    strategy_policies: dict[str, StrategyPolicy]
     portfolios: dict[str, PortfolioConfig]
     allocation_method: str
     allocation_weights: dict[str, Decimal]
@@ -274,6 +282,14 @@ def _build_portfolios(
                 str(value)
                 for value in item.get("fallback", {}).get("order", global_fallback)
             )
+            inverse_cfg = item.get("inverse_vol", {})
+            erc_cfg = item.get("erc", {})
+            covariance_estimator = str(erc_cfg.get("covariance", "ledoit_wolf")).lower()
+            if covariance_estimator not in {"ledoit_wolf", "sample"}:
+                raise ValueError(
+                    f"portfolio {portfolio_id} has unknown covariance estimator "
+                    f"{covariance_estimator!r}"
+                )
             _validate_portfolio_weights(
                 portfolio_id=portfolio_id,
                 route_id=route_id,
@@ -288,6 +304,23 @@ def _build_portfolios(
                 nav_source=nav_source,
                 fixed_nav=fixed_nav,
                 fallback_order=fallback_order,
+                inverse_vol_ewma_lambda=_decimal(
+                    inverse_cfg.get("ewma_lambda", "0.94"),
+                    field=f"portfolio.{portfolio_id}.inverse_vol.ewma_lambda",
+                ),
+                inverse_vol_min_observations=int(inverse_cfg.get("min_observations", 20)),
+                inverse_vol_lookback_observations=(
+                    int(inverse_cfg["lookback_days"])
+                    if inverse_cfg.get("lookback_days") is not None
+                    else None
+                ),
+                erc_min_observations=int(erc_cfg.get("min_observations", 30)),
+                erc_lookback_observations=(
+                    int(erc_cfg["lookback_days"])
+                    if erc_cfg.get("lookback_days") is not None
+                    else None
+                ),
+                covariance_estimator=covariance_estimator,
                 risk=_risk_config(item.get("risk", {}), risk_defaults),
             )
 
@@ -343,6 +376,13 @@ def _build_portfolios(
             nav_source, fixed_nav = "broker", None
         else:
             nav_source, fixed_nav = "broker", None
+        global_inverse_cfg = raw_portfolio.get("inverse_vol", {})
+        global_erc_cfg = raw_portfolio.get("erc", {})
+        covariance_estimator = str(
+            global_erc_cfg.get("covariance", "ledoit_wolf")
+        ).lower()
+        if covariance_estimator not in {"ledoit_wolf", "sample"}:
+            raise ValueError(f"unknown covariance estimator {covariance_estimator!r}")
         portfolios[route_id] = PortfolioConfig(
             portfolio_id=route_id,
             route_id=route_id,
@@ -351,6 +391,25 @@ def _build_portfolios(
             nav_source=nav_source,
             fixed_nav=fixed_nav,
             fallback_order=global_fallback,
+            inverse_vol_ewma_lambda=_decimal(
+                global_inverse_cfg.get("ewma_lambda", "0.94"),
+                field="portfolio.inverse_vol.ewma_lambda",
+            ),
+            inverse_vol_min_observations=int(
+                global_inverse_cfg.get("min_observations", 20)
+            ),
+            inverse_vol_lookback_observations=(
+                int(global_inverse_cfg["lookback_days"])
+                if global_inverse_cfg.get("lookback_days") is not None
+                else None
+            ),
+            erc_min_observations=int(global_erc_cfg.get("min_observations", 30)),
+            erc_lookback_observations=(
+                int(global_erc_cfg["lookback_days"])
+                if global_erc_cfg.get("lookback_days") is not None
+                else None
+            ),
+            covariance_estimator=covariance_estimator,
             risk=_risk_config({}, risk_defaults),
         )
     return portfolios, global_allocator, global_weights
@@ -522,6 +581,71 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
             },
         )
 
+    strategy_policies: dict[str, StrategyPolicy] = {}
+    for strategy_id, item in raw.get("strategies", {}).items():
+        policy = item.get("policy", {})
+        # V0.4 configs already carried strategy-level max_gross_leverage. Treat it as
+        # a backwards-compatible policy field instead of silently ignoring it.
+        max_gross_raw = policy.get("max_gross_leverage", item.get("max_gross_leverage"))
+        target_vol_raw = policy.get("target_volatility")
+        max_position_raw = policy.get("max_position_nav")
+        strategy_policies[strategy_id] = StrategyPolicy(
+            strategy_id=strategy_id,
+            version=str(policy.get("version", "1")),
+            source=str(policy.get("source", "config")),
+            risk_budget=_decimal(
+                policy.get("risk_budget", "1"),
+                field=f"strategies.{strategy_id}.policy.risk_budget",
+            ),
+            target_volatility=(
+                _decimal(
+                    target_vol_raw,
+                    field=f"strategies.{strategy_id}.policy.target_volatility",
+                )
+                if target_vol_raw is not None
+                else None
+            ),
+            volatility_metadata_key=str(
+                policy.get("volatility_metadata_key", "annualized_volatility")
+            ),
+            min_vol_scale=_decimal(
+                policy.get("min_vol_scale", "0"),
+                field=f"strategies.{strategy_id}.policy.min_vol_scale",
+            ),
+            max_vol_scale=_decimal(
+                policy.get("max_vol_scale", "1"),
+                field=f"strategies.{strategy_id}.policy.max_vol_scale",
+            ),
+            max_gross_leverage=(
+                _decimal(
+                    max_gross_raw,
+                    field=f"strategies.{strategy_id}.policy.max_gross_leverage",
+                )
+                if max_gross_raw is not None
+                else None
+            ),
+            max_position_nav=(
+                _decimal(
+                    max_position_raw,
+                    field=f"strategies.{strategy_id}.policy.max_position_nav",
+                )
+                if max_position_raw is not None
+                else None
+            ),
+            rebalance_band=_decimal(
+                policy.get("rebalance_band", "0"),
+                field=f"strategies.{strategy_id}.policy.rebalance_band",
+            ),
+            max_target_age_seconds=(
+                int(policy["max_target_age_seconds"])
+                if "max_target_age_seconds" in policy
+                else None
+            ),
+            on_missing_volatility=MissingVolatilityBehavior(
+                str(policy.get("on_missing_volatility", "block"))
+            ),
+        )
+
     casefolded_ids = [strategy_id.casefold() for strategy_id in strategies]
     if len(casefolded_ids) != len(set(casefolded_ids)):
         raise ValueError("configured strategy IDs must be unique ignoring case")
@@ -620,6 +744,7 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
         seeds=seeds,
         paper_seeds=paper_seeds,
         allocations=allocations,
+        strategy_policies=strategy_policies,
         portfolios=portfolios,
         allocation_method=allocation_method,
         allocation_weights=allocation_weights,

@@ -446,9 +446,9 @@ zero and only becomes retired after reconciliation. History is never deleted.
 The V0.4 alpha contains a common allocator interface for:
 
 - static allocation;
-- inverse-vol allocation;
-- ERC/risk-budget allocation with Ledoit-Wolf covariance;
-- deterministic fallbacks.
+- inverse-vol allocation with strategy risk-budget inputs;
+- ERC/risk-budget allocation with selectable Ledoit-Wolf (default) or sample covariance;
+- deterministic fallbacks with the configured and resolved method retained in diagnostics.
 
 For the September migration, each account's broker NetLiquidation is the capital base and the
 named portfolio's resolved weights are persisted into each strategy's allocated-capital budget.
@@ -456,9 +456,45 @@ Static allocation should remain the default until strategy NAV/P&L history is cl
 the inverse-vol/ERC implementations can later be selected independently per capital pool.
 
 Portfolio risk now applies gross, net, and single-instrument caps **per route/account**, and the
-final trade-size dust threshold also uses that route's NAV. Existing ETSA/RPS sleeve rebalance-band
-semantics remain available before same-account netting. Every allocation, risk, rebalance,
-execution, accounting and lifecycle decision is written to the audit ledger.
+final trade-size dust threshold also uses that route's NAV. `StrategyPolicy` adds an explicit
+strategy-level layer for risk budgets, opt-in target-volatility scaling, target freshness, gross
+leverage/position caps, and a capital-scaled rebalance band. The composed `PortfolioPolicyEngine`
+applies those controls plus route risk and implementation deadbands before same-account netting.
+
+A policy is configured under the strategy without changing strategy signal code:
+
+```toml
+[strategies.ETSA.policy]
+version = "1"
+source = "operator-config"
+risk_budget = 1.0
+max_gross_leverage = 2.0
+max_position_nav = 0.25
+rebalance_band = 0.005
+
+# Optional. If enabled, the strategy result must supply the configured metadata key.
+# target_volatility = 0.10
+# volatility_metadata_key = "annualized_volatility"
+# max_vol_scale = 1.0  # default does not lever above the strategy's native target
+# max_target_age_seconds = 900
+# on_missing_volatility = "block"
+```
+
+A native strategy can supply policy inputs as scalar metadata:
+
+```json
+{
+  "targets": {"EQ.US.AAPL": "0.25"},
+  "metadata": {"annualized_volatility": "0.18"}
+}
+```
+
+Synthetic companion `hold-current` intents are never rescaled; running ETSA cannot mutate RPS's
+virtual book merely because RPS did not run in that cycle. Every cycle persists
+`portfolio.decision_lineage` from translated strategy targets through policy, risk, deadbands,
+aggregate broker targets, and planned deltas. `status` exposes the active strategy policies and
+allocator diagnostics; `doctor` adds policy blockers and allocator-fallback warnings to the normal
+authority-aware reconciliation check.
 
 ## Audit rule
 

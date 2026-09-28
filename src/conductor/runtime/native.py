@@ -31,6 +31,22 @@ def _decimal_map(raw: object, field: str) -> dict[str, Decimal]:
     return out
 
 
+def _metadata_map(raw: object) -> dict[str, str]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise NativeResultError("metadata must be an object mapping string keys to scalar values")
+    out: dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not key.strip():
+            raise NativeResultError("metadata contains an invalid key")
+        if isinstance(value, (str, int, float, bool)):
+            out[key] = str(value)
+        else:
+            raise NativeResultError(f"metadata[{key!r}] must be a scalar value")
+    return out
+
+
 def load_native_result(path: str | Path) -> dict:
     try:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -77,6 +93,8 @@ def adapt_native_result(
     else:  # defensive against future enum additions
         raise NativeResultError(f"unsupported native result mode: {mode}")
 
+    strategy_metadata = _metadata_map(payload.get("metadata"))
+
     return StrategyIntent(
         strategy_id=profile.strategy_id,
         book_id=profile.book_id,
@@ -88,6 +106,7 @@ def adapt_native_result(
         revision=revision,
         intent_id=run_id,
         metadata={
+            **strategy_metadata,
             "producer": "conductor-runtime",
             "native_result_mode": mode.value,
             "run_id": run_id,

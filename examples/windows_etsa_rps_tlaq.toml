@@ -110,6 +110,13 @@ route_id = "ibkr_main"
 cwd = "C:/Trading/Yautja-Orchestra"
 command = ["uv", "run", "python", "etsa_conductor_adapter.py"]
 timeout_seconds = 600
+
+[strategies.ETSA.policy]
+version = "1"
+risk_budget = 1.0
+max_gross_leverage = 2.0
+rebalance_band = 0.0
+
 [strategies.ETSA.seed]
 # Bootstrap ownership/cash only. Allocated capital comes from 85% of ibkr_main broker NAV.
 cash = 0
@@ -124,6 +131,13 @@ command = ["uv", "run", "python", "rpschteroids_conductor_adapter.py"]
 timeout_seconds = 600
 [strategies.RPSchteroids.environment]
 RPS_TARGET_CALLABLE = "REPLACE.module:target_positions"
+
+[strategies.RPSchteroids.policy]
+version = "1"
+risk_budget = 1.0
+max_gross_leverage = 2.0
+rebalance_band = 0.0
+
 [strategies.RPSchteroids.seed]
 cash = 0
 positions = {}
@@ -137,6 +151,13 @@ command = ["uv", "run", "python", "tlaq_conductor_adapter.py"]
 timeout_seconds = 600
 [strategies.TLAQ.environment]
 TLAQ_DELTA_CALLABLE = "REPLACE.module:trade_deltas"
+
+[strategies.TLAQ.policy]
+version = "1"
+risk_budget = 1.0
+max_gross_leverage = 1.5
+rebalance_band = 0.0
+
 [strategies.TLAQ.seed]
 # TLAQ cash may legitimately be negative; that represents strategy financing.
 cash = 0

@@ -16,8 +16,9 @@ strategy adapter / target protocol
               |
               v
 Conductor control plane
-  route-backed capital pools -> virtual accounts -> allocation -> risk
-  -> rebalance bands -> same-route crossing -> broker delta
+  route-backed capital pools -> virtual accounts -> allocation
+  -> strategy policy -> portfolio policy/risk -> rebalance bands
+  -> same-route crossing -> broker delta
               |
               v
 execution adapter / durable local bridge
@@ -53,7 +54,9 @@ The main decision path is composed from small domain services:
 
 - `PortfolioBuilder` sizes strategy intent from each strategy's allocated capital and aggregates route-aware targets;
 - named `portfolio.<route_id>` capital pools resolve independent broker/fixed NAV and allocation policy;
-- `VirtualRebalanceBuffer` applies sleeve-level rebalance-band policy before same-route netting;
+- `StrategyPolicyEngine` applies versioned target-volatility, freshness, strategy leverage and concentration policy without changing strategy signal code;
+- `PortfolioPolicyEngine` composes strategy policy, route-local risk, and implementation buffering as one explicit pre-netting stage;
+- `VirtualRebalanceBuffer` applies strategy- and sleeve-level capital-scaled deadbands before same-route netting;
 - `PortfolioRiskEngine` applies deterministic limits independently per route/account;
 - `DesiredStateReconciler` computes desired minus actual broker quantity;
 - `OrderPlanner` suppresses uneconomic residual trades;
@@ -92,14 +95,15 @@ and Lubuntu and is distinct from live-account shadow mode.
 6. normalize output to absolute StrategyIntent
 7. persist desired strategy state/revision
 8. select the strategy's route-backed capital pool and same-route companion books
-9. build aggregate desired state for that route/account
-10. apply sleeve policy and route-local portfolio risk
-11. calculate desired broker delta
-12. internalize opposing same-route strategy changes where possible
-13. submit only residual external deltas, or return shadow reports
-14. refresh actual broker state for that route and reconcile
-15. commit only that route's virtual ownership/cash from reconciled facts
-16. persist run outcome and audit records
+9. translate strategy intent through its allocated capital into raw tradable targets
+10. apply versioned strategy policy, including optional target-volatility and strategy constraints
+11. apply route-local portfolio risk and capital-scaled strategy/sleeve deadbands
+12. persist full decision lineage and calculate desired broker delta
+13. internalize opposing same-route strategy changes where possible
+14. submit only residual external deltas, or return shadow reports
+15. refresh actual broker state for that route and reconcile
+16. commit only that route's virtual ownership/cash from reconciled facts
+17. persist run outcome and audit records
 ```
 
 Failures before reconciliation must leave the prior committed virtual ownership intact. A later run

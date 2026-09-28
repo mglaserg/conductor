@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Explicit versioned `StrategyPolicy` and composed `PortfolioPolicyEngine` stages between normalized
+  strategy intent/capital translation and broker netting. Policies support strategy risk budgets,
+  opt-in target-volatility scaling, freshness limits, gross-leverage and position concentration
+  caps, capital-scaled strategy rebalance bands, provenance, and explicit missing-volatility behavior.
+- Native strategy-result scalar `metadata` passthrough so policy inputs such as annualized volatility
+  can be supplied by the strategy without changing the frozen V0.3 target protocol.
+- Persisted `portfolio.decision_lineage` audit events showing translated strategy targets, policy
+  targets, risk-adjusted targets, implementation targets, aggregate broker targets, and planned deltas.
+- `status` and `doctor` policy/allocator diagnostics, including explicit allocator fallback evidence
+  and policy blockers.
+- ERC sample-covariance selection alongside the existing Ledoit-Wolf default, with configured `lookback_days` applied as a history window rather than conflated with the minimum-observation gate.
+
+### Safety
+
+- Synthetic `conductor-hold-current` companion intents are policy-invariant, so running one strategy
+  on a shared route cannot rescale another strategy that did not run.
+- Existing strategy-level `max_gross_leverage` configuration is now enforced instead of silently
+  ignored. Missing required target-volatility metadata fails closed by default.
+- Strategy deadbands are evaluated against that strategy's own allocated capital before sleeve
+  aggregation and broker netting.
+
+### Validation
+
+- Full local suite: 115 passed.
+- Added regressions for strategy leverage/volatility/freshness policy, hold-current invariance,
+  per-strategy deadbands, sample covariance, native metadata passthrough, and decision lineage.
+
 ## 0.4.0a17 - 2026-09-25
 
 ### Added
