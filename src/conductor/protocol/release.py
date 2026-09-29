@@ -41,3 +41,22 @@ class StrategyRelease:
 
     def can_trade_live(self) -> bool:
         return self.state == StrategyReleaseState.LIVE
+
+    @classmethod
+    def from_metadata(cls, strategy_id: str, metadata: object) -> "StrategyRelease":
+        """Create a release identity from attached strategy metadata.
+
+        Metadata remains the configuration-facing representation. This adapter
+        gives Conductor a single release object to reason about.
+        """
+        evidence = getattr(metadata, "evidence", ())
+        evidence_ids = tuple(
+            f"{item.producer}:{item.artifact_type}:{item.location}"
+            for item in evidence
+        )
+        return cls(
+            strategy_id=strategy_id,
+            version=getattr(metadata, "version", "0.0.0"),
+            state=StrategyReleaseState(getattr(metadata, "release_state", "research")),
+            evidence_ids=evidence_ids,
+        )
