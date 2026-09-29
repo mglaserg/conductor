@@ -24,6 +24,16 @@ class StrategyLifecycle(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class EvidenceReference:
+    """Pointer to an external research or validation artifact."""
+
+    producer: str
+    artifact_type: str
+    location: str
+    version: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class StrategyMetadata:
     """Research and lifecycle metadata attached to a strategy identity."""
 
@@ -32,6 +42,7 @@ class StrategyMetadata:
     mechanism: str | None = None
     research_source: str | None = None
     validation_state: str = "research"
+    evidence: tuple[EvidenceReference, ...] = ()
 
 
 class StrategyRunStatus(StrEnum):
