@@ -131,8 +131,11 @@ transfer between strategies that share a broker account.
 ## S16 — Release admission gates authority but never grants it
 
 Strategy-version admission uses the durable `RESEARCH -> VALIDATED -> SHADOW -> LIVE` state machine.
-Shadow cutover requires `SHADOW`; live-order runtime startup requires every strategy release on the
-route to be `LIVE`. `REVIEW` and `KILLED` disable future strategy runs.
+A transition into `VALIDATED` requires promotion-eligible portable validation evidence already
+ingested into the release ledger; configured metadata references alone do not satisfy that gate. Re-entry from
+`REVIEW` requires new qualifying validation evidence ingested after the review event. Shadow cutover
+requires `SHADOW`; live-order runtime startup requires every strategy release on the route to be
+`LIVE`. `REVIEW` and `KILLED` disable future strategy runs.
 
 A `LIVE` release is only a prerequisite. It never flips `live_orders_enabled` or transfers broker
 authority by itself.

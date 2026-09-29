@@ -884,11 +884,26 @@ class ConductorRuntimeApp:
         transitions = self.ledger.strategy_release_transitions(
             release.strategy_id, release.version
         )
+        evidence = self.ledger.strategy_release_evidence(
+            release.strategy_id, release.version
+        )
         return {
             "strategy_id": release.strategy_id,
             "version": release.version,
             "state": release.state.value,
             "evidence_ids": list(release.evidence_ids),
+            "evidence": evidence,
+            "ready_for_validation": any(
+                item["artifact_type"] == "research"
+                and item["eligible_for_validation"]
+                for item in evidence
+            ),
+            "ready_for_validated": any(
+                item["artifact_type"] == "validation"
+                and item["decision"] == "pass"
+                and item["eligible_for_promotion"]
+                for item in evidence
+            ),
             "allowed_transitions": [state.value for state in release.allowed_transitions()],
             "can_shadow": release.can_shadow(),
             "can_trade_live": release.can_trade_live(),

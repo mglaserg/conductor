@@ -117,15 +117,19 @@ outcome. A merely asynchronous submission remains submitted while broker state m
 ### Conductor ledger
 
 The main SQLite ledger is the durable source for accepted events, desired books, runtime books,
-strategy accounts, virtual positions, operational lifecycle, strategy releases, strategy runs,
-instrument cache, and audit data. A configured strategy version seeds its release only when that
-(strategy, version) is first seen; thereafter the persisted release state is canonical, and changing
-evidence requires a new version rather than mutating the admitted release.
+strategy accounts, virtual positions, operational lifecycle, strategy releases, portable release
+evidence, strategy runs, instrument cache, and audit data. A configured strategy version seeds its
+release only when that (strategy, version) is first seen; thereafter the persisted release state is
+canonical. Configured evidence references remain immutable for that version. Verified specialist
+artifacts are attached separately as append-only, content-addressed release evidence, so research
+and validation can accumulate without rewriting configuration or replacing prior evidence.
 
 Release admission is deliberately separate from the operational book lifecycle. A release advances
 through `RESEARCH -> VALIDATED -> SHADOW -> LIVE`, with `REVIEW` and terminal `KILLED` exception
-states. Transitions are explicit, persisted, audited, and fail closed. Admission gates shadow/cutover
-and live authority, but never enables broker submission on its own: route configuration must still
+states. Transitions are explicit, persisted, audited, and fail closed. Transitions into `VALIDATED`
+require an ingested promotion-eligible portable validation artifact. Revalidation after `REVIEW`
+requires a new such artifact ingested after the review event. Admission gates shadow/cutover and live authority,
+but never enables broker submission on its own: route configuration must still
 explicitly set `live_orders_enabled=true`, and runtime startup refuses that authority unless every
 strategy release on the route is LIVE.
 

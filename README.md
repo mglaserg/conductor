@@ -443,18 +443,27 @@ uv run conductor retire ETSA --config conductor.toml --confirm ETSA
 `disable` preserves current ownership and blocks future runs. `retire` targets the strategy book to
 zero and only becomes retired after reconciliation. History is never deleted.
 
-Strategy **release admission** is separate and version-specific. Inspect or advance the canonical
-release without starting a broker runtime:
+Strategy **release admission** is separate and version-specific. Portable Clockwork and EdgeLab
+artifacts are verified and attached to the durable release before admission changes:
 
 ```powershell
-uv run conductor release-status ETSA --config conductor.toml
-uv run conductor release-transition ETSA validated --config conductor.toml `
-  --reason "validation evidence accepted" --confirm ETSA:validated
-uv run conductor release-transition ETSA shadow --config conductor.toml `
-  --reason "shadow admission approved" --confirm ETSA:shadow
-uv run conductor release-transition ETSA live --config conductor.toml `
-  --reason "cutover evidence approved" --confirm ETSA:live
+uv run conductor evidence-ingest VixSnap C:\research\vixsnap\research_evidence.json --config conductor.toml
+uv run conductor evidence-ingest VixSnap C:\research\vixsnap\vixsnap-validation.json --config conductor.toml
+uv run conductor release-status VixSnap --config conductor.toml
+uv run conductor release-transition VixSnap validated --config conductor.toml `
+  --reason "sealed EdgeLab validation accepted" --confirm VixSnap:validated
+uv run conductor release-transition VixSnap shadow --config conductor.toml `
+  --reason "shadow admission approved" --confirm VixSnap:shadow
+uv run conductor release-transition VixSnap live --config conductor.toml `
+  --reason "cutover evidence approved" --confirm VixSnap:live
 ```
+
+`evidence-ingest` currently accepts `clockwork.research.v1` and `edgelab.validation.v1`. Conductor
+independently checks the producer/type contract, recomputes the artifact evidence ID, stores the
+exact payload plus SHA-256, and treats an exact replay as idempotent. Configured `evidence = [...]`
+references remain immutable seed metadata; they are **not** validation proof. A transition from
+`RESEARCH` to `VALIDATED` requires an ingested promotion-eligible validation artifact. Returning
+from `REVIEW` requires a new eligible validation artifact ingested after the review transition.
 
 The forward path is `RESEARCH -> VALIDATED -> SHADOW -> LIVE`. `REVIEW` and `KILLED` disable future
 runs; a reviewed release must re-enter through `VALIDATED`, while `KILLED` is terminal for that

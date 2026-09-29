@@ -24,7 +24,8 @@ with terminal/exception states `KILLED` and `REVIEW`.
 
 Allowed transitions are explicit and fail closed. `REVIEW` can return only to `VALIDATED` or move to
 `KILLED`; it cannot jump directly back to `SHADOW` or `LIVE`. `KILLED` is terminal for that version.
-Changing evidence still requires a new version.
+Configured evidence references remain immutable within a version. ADR 0010 later adds separately
+persisted, append-only portable evidence attachments without allowing configured evidence mutation.
 
 Every release transition is stored in `strategy_release_transitions` and mirrored to the append-only
 event ledger with actor, reason, prior state, target state, and timestamp. Repeating the current state

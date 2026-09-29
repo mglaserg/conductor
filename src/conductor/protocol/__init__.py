@@ -1,3 +1,4 @@
+from conductor.protocol.evidence import PortableEvidence, load_portable_evidence
 from conductor.protocol.models import (
     LINEAR_DATASCHEMA,
     LINEAR_EVENT_TYPE,
@@ -12,6 +13,7 @@ from conductor.protocol.sdk import FilesystemConductorClient
 
 __all__ = [
     "FilesystemConductorClient",
+    "PortableEvidence",
     "LINEAR_DATASCHEMA",
     "LINEAR_EVENT_TYPE",
     "LinearTargetSnapshot",
@@ -20,4 +22,5 @@ __all__ = [
     "StrategyProfile",
     "StructureTargetSnapshot",
     "TargetSnapshot",
+    "load_portable_evidence",
 ]

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 from conductor.domain.models import ZERO, ExposureType, StrategyIntent, VirtualTarget
+from conductor.protocol.evidence import PortableEvidence
 from conductor.protocol.release import StrategyRelease, StrategyReleaseState
 
 
@@ -131,6 +132,29 @@ class ConductorLedger:
 
                 CREATE INDEX IF NOT EXISTS ix_strategy_release_transitions_release
                     ON strategy_release_transitions(strategy_id, version, id);
+
+                CREATE TABLE IF NOT EXISTS strategy_release_evidence (
+                    strategy_id TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    evidence_id TEXT NOT NULL,
+                    producer TEXT NOT NULL,
+                    artifact_type TEXT NOT NULL,
+                    producer_version TEXT NOT NULL,
+                    schema_version TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    eligible_for_validation INTEGER NOT NULL,
+                    eligible_for_promotion INTEGER NOT NULL,
+                    location TEXT NOT NULL,
+                    artifact_sha256 TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    ingested_at TEXT NOT NULL,
+                    PRIMARY KEY (strategy_id, version, evidence_id),
+                    FOREIGN KEY (strategy_id, version)
+                        REFERENCES strategy_releases(strategy_id, version)
+                );
+
+                CREATE INDEX IF NOT EXISTS ix_strategy_release_evidence_release
+                    ON strategy_release_evidence(strategy_id, version, ingested_at, evidence_id);
 
                 CREATE TABLE IF NOT EXISTS strategy_runs (
                     run_id TEXT PRIMARY KEY,
@@ -732,11 +756,191 @@ class ConductorLedger:
             for row in rows
         ]
 
+    def _combined_release_evidence_ids_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        strategy_id: str,
+        version: str,
+        configured_ids: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        rows = conn.execute(
+            """
+            SELECT evidence_id
+            FROM strategy_release_evidence
+            WHERE strategy_id=? AND version=?
+            ORDER BY ingested_at, evidence_id
+            """,
+            (strategy_id, version),
+        ).fetchall()
+        return tuple(dict.fromkeys((*configured_ids, *(row["evidence_id"] for row in rows))))
+
+    def attach_strategy_release_evidence(
+        self,
+        strategy_id: str,
+        version: str,
+        evidence: PortableEvidence,
+    ) -> bool:
+        """Attach one verified portable artifact to a release, append-only and idempotently.
+
+        Returns True when a new attachment was recorded and False for an exact replay.  An
+        evidence-id collision with different content fails closed.
+        """
+        payload_json = json.dumps(
+            evidence.payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            release_row = conn.execute(
+                """
+                SELECT 1 FROM strategy_releases
+                WHERE strategy_id=? AND version=?
+                """,
+                (strategy_id, version),
+            ).fetchone()
+            if release_row is None:
+                raise KeyError(f"unknown strategy release: {strategy_id}/{version}")
+
+            existing = conn.execute(
+                """
+                SELECT producer, artifact_type, producer_version, schema_version, decision,
+                       eligible_for_validation, eligible_for_promotion, location,
+                       artifact_sha256, payload_json
+                FROM strategy_release_evidence
+                WHERE strategy_id=? AND version=? AND evidence_id=?
+                """,
+                (strategy_id, version, evidence.evidence_id),
+            ).fetchone()
+            if existing is not None:
+                same = (
+                    existing["producer"] == evidence.producer
+                    and existing["artifact_type"] == evidence.artifact_type
+                    and existing["producer_version"] == evidence.producer_version
+                    and existing["schema_version"] == evidence.schema_version
+                    and existing["decision"] == evidence.decision
+                    and bool(existing["eligible_for_validation"])
+                    == evidence.eligible_for_validation
+                    and bool(existing["eligible_for_promotion"])
+                    == evidence.eligible_for_promotion
+                    and existing["artifact_sha256"] == evidence.artifact_sha256
+                    and existing["payload_json"] == payload_json
+                )
+                if same:
+                    return False
+                raise RuntimeError(
+                    f"evidence id collision for {evidence.evidence_id}; persisted content differs"
+                )
+
+            conn.execute(
+                """
+                INSERT INTO strategy_release_evidence(
+                    strategy_id, version, evidence_id, producer, artifact_type, producer_version,
+                    schema_version, decision, eligible_for_validation, eligible_for_promotion,
+                    location, artifact_sha256, payload_json, ingested_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    strategy_id,
+                    version,
+                    evidence.evidence_id,
+                    evidence.producer,
+                    evidence.artifact_type,
+                    evidence.producer_version,
+                    evidence.schema_version,
+                    evidence.decision,
+                    int(evidence.eligible_for_validation),
+                    int(evidence.eligible_for_promotion),
+                    evidence.location,
+                    evidence.artifact_sha256,
+                    payload_json,
+                    now,
+                ),
+            )
+            self._append_event_on_conn(
+                conn,
+                "strategy.release_evidence_ingested",
+                {
+                    "strategy_id": strategy_id,
+                    "version": version,
+                    **evidence.summary(),
+                },
+                now,
+            )
+            return True
+
+    def strategy_release_evidence(
+        self, strategy_id: str, version: str
+    ) -> list[dict[str, object]]:
+        """Return immutable portable-evidence attachments in ingestion order."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT evidence_id, producer, artifact_type, producer_version, schema_version,
+                       decision, eligible_for_validation, eligible_for_promotion, location,
+                       artifact_sha256, ingested_at
+                FROM strategy_release_evidence
+                WHERE strategy_id=? AND version=?
+                ORDER BY ingested_at, evidence_id
+                """,
+                (strategy_id, version),
+            ).fetchall()
+        return [
+            {
+                "evidence_id": row["evidence_id"],
+                "producer": row["producer"],
+                "artifact_type": row["artifact_type"],
+                "producer_version": row["producer_version"],
+                "schema_version": row["schema_version"],
+                "decision": row["decision"],
+                "eligible_for_validation": bool(row["eligible_for_validation"]),
+                "eligible_for_promotion": bool(row["eligible_for_promotion"]),
+                "location": row["location"],
+                "artifact_sha256": row["artifact_sha256"],
+                "ingested_at": row["ingested_at"],
+            }
+            for row in rows
+        ]
+
+    def _require_validation_evidence_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        strategy_id: str,
+        version: str,
+        *,
+        after: str | None = None,
+    ) -> None:
+        clauses = [
+            "strategy_id=?",
+            "version=?",
+            "artifact_type='validation'",
+            "decision='pass'",
+            "eligible_for_promotion=1",
+        ]
+        params: list[object] = [strategy_id, version]
+        if after is not None:
+            clauses.append("ingested_at > ?")
+            params.append(after)
+        row = conn.execute(
+            f"SELECT 1 FROM strategy_release_evidence WHERE {' AND '.join(clauses)} LIMIT 1",
+            params,
+        ).fetchone()
+        if row is None:
+            suffix = " ingested after REVIEW" if after is not None else ""
+            raise ValueError(
+                "validated admission requires promotion-eligible portable validation evidence"
+                f"{suffix}"
+            )
+
     def ensure_strategy_release(self, release: StrategyRelease) -> StrategyRelease:
         """Register a release once and return Conductor's persisted canonical record.
 
         Configuration may seed a new release, but once a (strategy_id, version) exists the ledger
-        owns its state. Evidence is immutable for a version: changing it requires a new version.
+        owns its state. Configured evidence references are immutable for a version; verified portable
+        evidence is attached separately as append-only ledger state.
         """
         now = datetime.now(timezone.utc).isoformat()
         created_at = release.created_at.astimezone(timezone.utc).isoformat()
@@ -794,11 +998,14 @@ class ConductorLedger:
                     "from the persisted release; publish a new version instead of mutating "
                     "a release"
                 )
+            combined_ids = self._combined_release_evidence_ids_on_conn(
+                conn, release.strategy_id, release.version, evidence_ids
+            )
             return StrategyRelease(
                 strategy_id=release.strategy_id,
                 version=release.version,
                 state=StrategyReleaseState(existing["state"]),
-                evidence_ids=evidence_ids,
+                evidence_ids=combined_ids,
                 created_at=datetime.fromisoformat(existing["created_at"]),
             )
 
@@ -812,13 +1019,17 @@ class ConductorLedger:
                 """,
                 (strategy_id, version),
             ).fetchone()
-        if row is None:
-            return None
+            if row is None:
+                return None
+            configured_ids = tuple(json.loads(row["evidence_ids_json"]))
+            evidence_ids = self._combined_release_evidence_ids_on_conn(
+                conn, strategy_id, version, configured_ids
+            )
         return StrategyRelease(
             strategy_id=strategy_id,
             version=version,
             state=StrategyReleaseState(row["state"]),
-            evidence_ids=tuple(json.loads(row["evidence_ids_json"])),
+            evidence_ids=evidence_ids,
             created_at=datetime.fromisoformat(row["created_at"]),
         )
 
@@ -853,16 +1064,39 @@ class ConductorLedger:
             if row is None:
                 raise KeyError(f"unknown strategy release: {strategy_id}/{version}")
 
+            configured_ids = tuple(json.loads(row["evidence_ids_json"]))
             current = StrategyRelease(
                 strategy_id=strategy_id,
                 version=version,
                 state=StrategyReleaseState(row["state"]),
-                evidence_ids=tuple(json.loads(row["evidence_ids_json"])),
+                evidence_ids=self._combined_release_evidence_ids_on_conn(
+                    conn, strategy_id, version, configured_ids
+                ),
                 created_at=datetime.fromisoformat(row["created_at"]),
             )
             transitioned = current.transitioned(target)
             if transitioned.state == current.state:
                 return current
+
+            if target is StrategyReleaseState.VALIDATED and current.state in {
+                StrategyReleaseState.RESEARCH,
+                StrategyReleaseState.REVIEW,
+            }:
+                after = None
+                if current.state is StrategyReleaseState.REVIEW:
+                    review = conn.execute(
+                        """
+                        SELECT transitioned_at
+                        FROM strategy_release_transitions
+                        WHERE strategy_id=? AND version=? AND to_state='review'
+                        ORDER BY id DESC LIMIT 1
+                        """,
+                        (strategy_id, version),
+                    ).fetchone()
+                    after = review["transitioned_at"] if review is not None else now
+                self._require_validation_evidence_on_conn(
+                    conn, strategy_id, version, after=after
+                )
 
             conn.execute(
                 """

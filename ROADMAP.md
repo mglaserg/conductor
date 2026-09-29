@@ -72,6 +72,9 @@ Windows equity strategies without rewriting their strategy logic.
   ownership bootstrap commands;
 - durable strategy-release admission with audited `RESEARCH -> VALIDATED -> SHADOW -> LIVE`
   transitions, REVIEW/KILLED handling, shadow/cutover gates, and fail-closed live-authority startup;
+- append-only portable evidence ingestion for `clockwork.research.v1` and `edgelab.validation.v1`,
+  including independent content-hash verification and a hard validation-evidence gate on
+  `RESEARCH/REVIEW -> VALIDATED` transitions;
 - read-only local dashboard;
 - Windows Task Scheduler helpers and an operator migration runbook.
 - portable offline `run --paper`/`status --paper` execution with a separate SQLite source of truth,

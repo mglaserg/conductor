@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -8,7 +9,44 @@ import pytest
 
 from conductor.command import main as command_main
 from conductor.ledger import ConductorLedger
+from conductor.protocol.evidence import load_portable_evidence
 from conductor.protocol.release import StrategyRelease, StrategyReleaseState
+
+
+def _write_validation_evidence(
+    tmp_path: Path, *, trial_id: str = "trial-1", name: str = "validation.json"
+) -> Path:
+    body = {
+        "schema_version": "edgelab.validation.v1",
+        "producer": "edgelab",
+        "artifact_type": "validation",
+        "producer_version": "0.3.0",
+        "decision": "pass",
+        "eligible_for_promotion": True,
+        "hypothesis": {"id": "ETSA"},
+        "evaluation": {"trial_id": trial_id, "window": "oos", "survives": True},
+    }
+    canonical = json.dumps(
+        body, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    ).encode("utf-8")
+    evidence_id = f"edgelab:ETSA:{hashlib.sha256(canonical).hexdigest()[:24]}"
+    path = tmp_path / name
+    path.write_text(
+        json.dumps({"evidence_id": evidence_id, **body}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _attach_validation(
+    ledger: ConductorLedger, tmp_path: Path, *, version: str = "1.0.0", trial_id: str = "trial-1"
+) -> None:
+    path = _write_validation_evidence(
+        tmp_path, trial_id=trial_id, name=f"{trial_id}.json"
+    )
+    ledger.attach_strategy_release_evidence(
+        "ETSA", version, load_portable_evidence(path)
+    )
 
 
 def _release_config(tmp_path: Path) -> Path:
@@ -77,6 +115,7 @@ def test_release_transitions_are_persisted_audited_and_idempotent(tmp_path) -> N
             evidence_ids=("clockwork:research:evidence/etsa.json",),
         )
     )
+    _attach_validation(ledger, tmp_path)
 
     validated = ledger.transition_strategy_release(
         "ETSA", "1.0.0", "validated", reason="EdgeLab validation passed", actor="test"
@@ -108,6 +147,14 @@ def test_release_cli_transitions_without_starting_execution_runtime(
     tmp_path, monkeypatch, capsys
 ) -> None:
     config = _release_config(tmp_path)
+    evidence = _write_validation_evidence(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["conductor", "evidence-ingest", "ETSA", str(evidence), "--config", str(config)],
+    )
+    command_main()
+    capsys.readouterr()
 
     monkeypatch.setattr(
         sys,
@@ -164,6 +211,14 @@ def test_release_cli_refuses_missing_exact_confirmation(tmp_path, monkeypatch) -
 
 def test_review_transition_disables_operational_runs(tmp_path, monkeypatch, capsys) -> None:
     config = _release_config(tmp_path)
+    evidence = _write_validation_evidence(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["conductor", "evidence-ingest", "ETSA", str(evidence), "--config", str(config)],
+    )
+    command_main()
+    capsys.readouterr()
     for state, reason in (("validated", "validated"), ("review", "needs review")):
         monkeypatch.setattr(
             sys,
@@ -208,6 +263,9 @@ def test_live_authority_requires_every_route_release_live(tmp_path) -> None:
             evidence_ids=("clockwork:research:evidence/etsa.json",),
         )
     )
+    _attach_validation(ledger, tmp_path)
+    release = ledger.strategy_release("ETSA", "1.0.0")
+    assert release is not None
     for target in ("validated", "shadow", "live"):
         release = ledger.transition_strategy_release(
             "ETSA", release.version, target, reason=f"advance to {target}", actor="test"
@@ -225,6 +283,14 @@ def test_review_requires_explicit_revalidation_and_reactivation(tmp_path, monkey
     from conductor.runtime.app import ConductorRuntimeApp
 
     config = _release_config(tmp_path)
+    evidence = _write_validation_evidence(tmp_path, trial_id="trial-initial")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["conductor", "evidence-ingest", "ETSA", str(evidence), "--config", str(config)],
+    )
+    command_main()
+    capsys.readouterr()
     for state in ("validated", "review"):
         monkeypatch.setattr(
             sys,
@@ -251,6 +317,17 @@ def test_review_requires_explicit_revalidation_and_reactivation(tmp_path, monkey
             app.activate_strategy("ETSA")
     finally:
         app.close()
+
+    refreshed = _write_validation_evidence(
+        tmp_path, trial_id="trial-review", name="review-validation.json"
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["conductor", "evidence-ingest", "ETSA", str(refreshed), "--config", str(config)],
+    )
+    command_main()
+    capsys.readouterr()
 
     monkeypatch.setattr(
         sys,

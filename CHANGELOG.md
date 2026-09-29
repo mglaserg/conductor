@@ -4,6 +4,11 @@
 
 ### Added
 
+- Portable specialist-evidence ingestion with `conductor evidence-ingest`. Conductor independently
+  verifies Clockwork `clockwork.research.v1` and EdgeLab `edgelab.validation.v1` artifacts, stores
+  exact payload/hash provenance append-only, exposes imported evidence in release status, and
+  requires promotion-eligible validation evidence for transitions into `VALIDATED`. Revalidation after
+  `REVIEW` requires fresh qualifying evidence ingested after the review event.
 - Durable `StrategyRelease` registry in the Conductor ledger, keyed by strategy/version. Configured
   metadata seeds a release only on first registration; subsequent startup reads the persisted state,
   while evidence changes for the same version fail closed and require a version bump.

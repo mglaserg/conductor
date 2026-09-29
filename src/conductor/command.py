@@ -69,6 +69,14 @@ def main() -> None:
         help="required; must exactly match <canonical-strategy-id>:<target-state>",
     )
 
+    evidence_ingest = sub.add_parser(
+        "evidence-ingest",
+        help="verify and attach one Clockwork/EdgeLab evidence artifact to a strategy release",
+    )
+    evidence_ingest.add_argument("strategy_id")
+    evidence_ingest.add_argument("path", type=Path)
+    evidence_ingest.add_argument("--config", default="conductor.toml", type=Path)
+
     doctor = sub.add_parser(
         "doctor", help="read-only authority-aware reconciliation check"
     )
@@ -230,9 +238,10 @@ def main() -> None:
             )
         )
 
-    if args.command in {"release-status", "release-transition"}:
+    if args.command in {"release-status", "release-transition", "evidence-ingest"}:
         from conductor.config import load_runtime_config
         from conductor.ledger import ConductorLedger
+        from conductor.protocol.evidence import load_portable_evidence
         from conductor.protocol.release import StrategyRelease, StrategyReleaseState
 
         config = load_runtime_config(args.config)
@@ -263,6 +272,49 @@ def main() -> None:
         except (RuntimeError, ValueError) as exc:
             raise SystemExit(f"REFUSED: {exc}") from exc
 
+        if args.command == "evidence-ingest":
+            try:
+                evidence = load_portable_evidence(args.path)
+                inserted = ledger.attach_strategy_release_evidence(
+                    strategy_id, release.version, evidence
+                )
+                release = ledger.strategy_release(strategy_id, release.version)
+                if release is None:  # pragma: no cover - release was just ensured above
+                    raise RuntimeError("strategy release disappeared during evidence ingestion")
+            except (KeyError, RuntimeError, ValueError) as exc:
+                raise SystemExit(f"REFUSED: {exc}") from exc
+
+            evidence_records = ledger.strategy_release_evidence(
+                release.strategy_id, release.version
+            )
+            print(
+                json.dumps(
+                    {
+                        "strategy_id": release.strategy_id,
+                        "version": release.version,
+                        "state": release.state.value,
+                        "ingested": inserted,
+                        "artifact": evidence.summary(),
+                        "evidence_ids": list(release.evidence_ids),
+                        "evidence": evidence_records,
+                        "ready_for_validation": any(
+                            item["artifact_type"] == "research"
+                            and item["eligible_for_validation"]
+                            for item in evidence_records
+                        ),
+                        "ready_for_validated": any(
+                            item["artifact_type"] == "validation"
+                            and item["decision"] == "pass"
+                            and item["eligible_for_promotion"]
+                            for item in evidence_records
+                        ),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return
+
         if args.command == "release-transition":
             try:
                 release = ledger.transition_strategy_release(
@@ -279,11 +331,15 @@ def main() -> None:
             except (KeyError, ValueError) as exc:
                 raise SystemExit(f"REFUSED: {exc}") from exc
 
+        evidence_records = ledger.strategy_release_evidence(
+            release.strategy_id, release.version
+        )
         payload = {
             "strategy_id": release.strategy_id,
             "version": release.version,
             "state": release.state.value,
             "evidence_ids": list(release.evidence_ids),
+            "evidence": evidence_records,
             "allowed_transitions": [state.value for state in release.allowed_transitions()],
             "can_shadow": release.can_shadow(),
             "can_trade_live": release.can_trade_live(),
