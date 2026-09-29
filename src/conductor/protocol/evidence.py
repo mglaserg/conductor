@@ -8,6 +8,7 @@ from typing import Any
 
 CLOCKWORK_RESEARCH_SCHEMA = "clockwork.research.v1"
 EDGELAB_VALIDATION_SCHEMA = "edgelab.validation.v1"
+FACTORSTRIP_DECOMPOSITION_SCHEMA = "factorstrip.decomposition.v1"
 
 _OOS_WINDOWS = {
     "oos",
@@ -73,6 +74,7 @@ class PortableEvidence:
     location: str
     artifact_sha256: str
     payload: dict[str, Any]
+    subject_strategy_id: str | None = None
 
     @property
     def promotion_eligible_validation(self) -> bool:
@@ -98,7 +100,7 @@ class PortableEvidence:
 
 
 def load_portable_evidence(path: str | Path) -> PortableEvidence:
-    """Load and independently verify a Clockwork or EdgeLab portable evidence artifact."""
+    """Load and independently verify a supported specialist evidence artifact."""
     artifact = Path(path)
     try:
         raw = artifact.read_bytes()
@@ -130,6 +132,7 @@ def load_portable_evidence(path: str | Path) -> PortableEvidence:
             f"evidence_id content hash mismatch: expected {expected_id}, got {evidence_id}"
         )
 
+    subject_strategy_id: str | None = None
     if schema_version == CLOCKWORK_RESEARCH_SCHEMA:
         if producer != "clockwork" or artifact_type != "research":
             raise ValueError(
@@ -176,6 +179,51 @@ def load_portable_evidence(path: str | Path) -> PortableEvidence:
                 )
             if not str(evaluation.get("trial_id") or "").strip():
                 raise ValueError("promotion-eligible EdgeLab evidence requires evaluation.trial_id")
+        subject_strategy_id = None
+    elif schema_version == FACTORSTRIP_DECOMPOSITION_SCHEMA:
+        if producer != "factorstrip" or artifact_type != "decomposition":
+            raise ValueError(
+                "factorstrip.decomposition.v1 must declare producer='factorstrip' and "
+                "artifact_type='decomposition'"
+            )
+        eligible_for_validation = _required_bool(payload, "eligible_for_validation")
+        eligible_for_promotion = _required_bool(payload, "eligible_for_promotion")
+        if decision != "descriptive":
+            raise ValueError("FactorStrip decomposition decision must be 'descriptive'")
+        if eligible_for_validation or eligible_for_promotion:
+            raise ValueError(
+                "FactorStrip decomposition evidence must not be eligible for validation "
+                "or promotion"
+            )
+
+        decomposition = payload.get("decomposition")
+        if not isinstance(decomposition, dict):
+            raise ValueError("FactorStrip decomposition evidence requires a decomposition object")
+        subject_strategy_id = str(decomposition.get("strategy_id") or "").strip()
+        if not subject_strategy_id:
+            raise ValueError("FactorStrip decomposition requires decomposition.strategy_id")
+        if subject_strategy_id.casefold() != hypothesis_id.casefold():
+            raise ValueError(
+                "FactorStrip decomposition.strategy_id must match hypothesis.id"
+            )
+        observations = decomposition.get("observations")
+        if not isinstance(observations, int) or isinstance(observations, bool) or observations <= 0:
+            raise ValueError("FactorStrip decomposition.observations must be a positive integer")
+        factor_betas = decomposition.get("factor_betas")
+        if not isinstance(factor_betas, dict) or not factor_betas:
+            raise ValueError("FactorStrip decomposition.factor_betas must be a non-empty object")
+
+        methodology = payload.get("methodology")
+        if not isinstance(methodology, dict):
+            raise ValueError("FactorStrip decomposition evidence requires a methodology object")
+        if methodology.get("model") != "time_series_ols_with_intercept":
+            raise ValueError(
+                "FactorStrip decomposition methodology.model must be "
+                "'time_series_ols_with_intercept'"
+            )
+        interpretation = methodology.get("interpretation")
+        if not isinstance(interpretation, str) or not interpretation.strip():
+            raise ValueError("FactorStrip decomposition methodology.interpretation is required")
     else:
         raise ValueError(f"unsupported evidence schema: {schema_version}")
 
@@ -191,4 +239,5 @@ def load_portable_evidence(path: str | Path) -> PortableEvidence:
         location=str(artifact.resolve()),
         artifact_sha256=hashlib.sha256(raw).hexdigest(),
         payload=payload,
+        subject_strategy_id=subject_strategy_id,
     )

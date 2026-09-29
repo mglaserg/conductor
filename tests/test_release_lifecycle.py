@@ -38,6 +38,46 @@ def _write_validation_evidence(
     return path
 
 
+def _write_factorstrip_evidence(tmp_path: Path, *, strategy_id: str = "ETSA") -> Path:
+    body = {
+        "schema_version": "factorstrip.decomposition.v1",
+        "producer": "factorstrip",
+        "artifact_type": "decomposition",
+        "producer_version": "0.5.0",
+        "decision": "descriptive",
+        "eligible_for_validation": False,
+        "eligible_for_promotion": False,
+        "hypothesis": {
+            "id": strategy_id,
+            "family": "factor_attribution",
+            "name": strategy_id,
+        },
+        "decomposition": {
+            "strategy_id": strategy_id,
+            "observations": 252,
+            "factor_betas": {"MKT": 0.75},
+            "r2": 0.55,
+            "warnings": ["descriptive_factor_attribution_not_validation"],
+        },
+        "methodology": {
+            "model": "time_series_ols_with_intercept",
+            "purpose": "describe_factor_span_and_residual_return_component",
+            "interpretation": "Descriptive only; this is not promotion evidence.",
+        },
+        "inputs": {"fixture": "synthetic"},
+    }
+    canonical = json.dumps(
+        body, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    ).encode("utf-8")
+    evidence_id = f"factorstrip:{strategy_id}:{hashlib.sha256(canonical).hexdigest()[:24]}"
+    path = tmp_path / "factorstrip.json"
+    path.write_text(
+        json.dumps({"evidence_id": evidence_id, **body}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def _attach_validation(
     ledger: ConductorLedger, tmp_path: Path, *, version: str = "1.0.0", trial_id: str = "trial-1"
 ) -> None:
@@ -187,6 +227,37 @@ def test_release_cli_transitions_without_starting_execution_runtime(
     command_main()
     persisted = json.loads(capsys.readouterr().out)
     assert persisted["state"] == "validated"
+
+
+def test_factorstrip_cli_ingest_surfaces_decomposition_without_admission(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    config = _release_config(tmp_path)
+    evidence = _write_factorstrip_evidence(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["conductor", "evidence-ingest", "ETSA", str(evidence), "--config", str(config)],
+    )
+    command_main()
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["artifact"]["schema_version"] == "factorstrip.decomposition.v1"
+    assert payload["ready_for_validation"] is False
+    assert payload["ready_for_validated"] is False
+    assert payload["factor_decompositions"][0]["decomposition"]["factor_betas"] == {
+        "MKT": 0.75
+    }
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["conductor", "release-status", "ETSA", "--config", str(config)],
+    )
+    command_main()
+    status = json.loads(capsys.readouterr().out)
+    assert status["factor_decompositions"][0]["evidence_id"] == payload["artifact"]["evidence_id"]
+    assert status["state"] == "research"
 
 
 def test_release_cli_refuses_missing_exact_confirmation(tmp_path, monkeypatch) -> None:

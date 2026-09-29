@@ -785,6 +785,15 @@ class ConductorLedger:
         Returns True when a new attachment was recorded and False for an exact replay.  An
         evidence-id collision with different content fails closed.
         """
+        if (
+            evidence.subject_strategy_id is not None
+            and evidence.subject_strategy_id.casefold() != strategy_id.casefold()
+        ):
+            raise ValueError(
+                f"evidence subject {evidence.subject_strategy_id!r} does not match "
+                f"strategy release {strategy_id!r}"
+            )
+
         payload_json = json.dumps(
             evidence.payload,
             sort_keys=True,
@@ -904,6 +913,39 @@ class ConductorLedger:
             }
             for row in rows
         ]
+
+    def strategy_release_factor_decompositions(
+        self, strategy_id: str, version: str
+    ) -> list[dict[str, object]]:
+        """Return FactorStrip decomposition summaries attached to one release."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT evidence_id, producer_version, payload_json, ingested_at
+                FROM strategy_release_evidence
+                WHERE strategy_id=? AND version=?
+                  AND producer='factorstrip'
+                  AND artifact_type='decomposition'
+                  AND schema_version='factorstrip.decomposition.v1'
+                ORDER BY ingested_at, evidence_id
+                """,
+                (strategy_id, version),
+            ).fetchall()
+
+        summaries: list[dict[str, object]] = []
+        for row in rows:
+            payload = json.loads(row["payload_json"])
+            summaries.append(
+                {
+                    "evidence_id": row["evidence_id"],
+                    "producer_version": row["producer_version"],
+                    "ingested_at": row["ingested_at"],
+                    "decomposition": payload.get("decomposition", {}),
+                    "methodology": payload.get("methodology", {}),
+                    "inputs": payload.get("inputs", {}),
+                }
+            )
+        return summaries
 
     def _require_validation_evidence_on_conn(
         self,

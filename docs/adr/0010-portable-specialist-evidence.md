@@ -5,8 +5,8 @@
 
 ## Context
 
-Clockwork and EdgeLab can now emit self-contained JSON evidence artifacts, but Conductor previously
-accepted only configured evidence pointers such as `producer`, `artifact_type`, and `location`.
+Clockwork, EdgeLab, and FactorStrip can emit self-contained JSON evidence artifacts, but Conductor
+previously accepted only configured evidence pointers such as `producer`, `artifact_type`, and `location`.
 Those pointers were useful metadata but were not proof that Conductor had read the artifact, checked
 its contents, or preserved the exact validation result used for admission.
 
@@ -22,7 +22,8 @@ Conductor accepts portable specialist artifacts through `conductor evidence-inge
 The first supported schemas are:
 
 - `clockwork.research.v1` from Clockwork;
-- `edgelab.validation.v1` from EdgeLab.
+- `edgelab.validation.v1` from EdgeLab;
+- `factorstrip.decomposition.v1` from FactorStrip.
 
 Conductor independently validates the declared producer/artifact type, recomputes the producer's
 content-addressed `evidence_id`, checks schema-specific admission semantics, and stores the exact JSON
@@ -40,7 +41,10 @@ recent transition to `REVIEW`.
 
 Clockwork research evidence can establish readiness for independent validation but cannot by itself
 promote a release. EdgeLab validation evidence can satisfy the statistical admission proof but does
-not skip the explicit Conductor release transition or any later shadow/live gate.
+not skip the explicit Conductor release transition or any later shadow/live gate. FactorStrip
+decomposition evidence is descriptive attribution only: Conductor requires `decision=descriptive`,
+rejects any validation/promotion eligibility flag, binds the decomposition to the target strategy,
+and never treats it as validation proof.
 
 ## Consequences
 
@@ -50,5 +54,6 @@ not skip the explicit Conductor release transition or any later shadow/live gate
 - Specialist repositories remain independent: they produce evidence but cannot grant broker
   authority or mutate Conductor release state.
 - New transitions into `VALIDATED` become evidence-backed rather than operator labels alone.
+- FactorStrip attribution is visible beside a release without becoming a gate or an orchestrator.
 - New evidence producers require an explicit schema adapter/validator in Conductor instead of being
   accepted as arbitrary JSON.

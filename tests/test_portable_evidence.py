@@ -57,6 +57,62 @@ def _edgelab(path: Path, *, trial_id: str = "trial-1") -> Path:
     return _write_artifact(path, body, producer="edgelab", hypothesis_id="vixsnap")
 
 
+def _factorstrip(
+    path: Path,
+    *,
+    strategy_id: str = "VixSnap",
+    decision: str = "descriptive",
+    eligible_for_validation: bool = False,
+    eligible_for_promotion: bool = False,
+) -> Path:
+    body = {
+        "schema_version": "factorstrip.decomposition.v1",
+        "producer": "factorstrip",
+        "artifact_type": "decomposition",
+        "producer_version": "0.5.0",
+        "decision": decision,
+        "eligible_for_validation": eligible_for_validation,
+        "eligible_for_promotion": eligible_for_promotion,
+        "hypothesis": {
+            "id": strategy_id,
+            "family": "factor_attribution",
+            "name": strategy_id,
+        },
+        "decomposition": {
+            "strategy_id": strategy_id,
+            "observations": 252,
+            "sample_start": "2025-01-02 00:00:00",
+            "sample_end": "2025-12-31 00:00:00",
+            "periods_per_year": 252,
+            "factor_betas": {"MKT": 0.8, "VALUE": -0.2},
+            "factor_contributions_annualized": {"MKT": 0.04, "VALUE": -0.01},
+            "r2": 0.61,
+            "time_series_intercept_per_period": 0.0001,
+            "time_series_intercept_annualized": 0.0252,
+            "strategy_mean_annualized": 0.08,
+            "factor_spanned_mean_annualized": 0.0548,
+            "strategy_vol_annualized": 0.14,
+            "residual_vol_annualized": 0.09,
+            "max_abs_residual_factor_corr": 0.0,
+            "condition_number": 2.1,
+            "warnings": [
+                "descriptive_factor_attribution_not_validation",
+                "time_series_intercept_is_not_cross_sectional_orthogonal_alpha",
+            ],
+        },
+        "methodology": {
+            "model": "time_series_ols_with_intercept",
+            "purpose": "describe_factor_span_and_residual_return_component",
+            "interpretation": (
+                "Descriptive only. The time-series intercept is not equivalent to "
+                "cross-sectional orthogonal alpha and is not a promotion decision."
+            ),
+        },
+        "inputs": {"strategy_returns_sha256": "abc", "factor_returns_sha256": "def"},
+    }
+    return _write_artifact(path, body, producer="factorstrip", hypothesis_id=strategy_id)
+
+
 def test_clockwork_research_artifact_is_verified_and_not_promotion_evidence(tmp_path) -> None:
     evidence = load_portable_evidence(_clockwork(tmp_path / "research.json"))
 
@@ -108,3 +164,50 @@ def test_release_evidence_is_append_only_idempotent_and_gates_validation(tmp_pat
         row for row in ledger.events() if row["event_type"] == "strategy.release_evidence_ingested"
     ]
     assert len(events) == 2
+
+
+def test_factorstrip_decomposition_is_verified_descriptive_and_never_admission_proof(
+    tmp_path,
+) -> None:
+    evidence = load_portable_evidence(_factorstrip(tmp_path / "decomposition.json"))
+
+    assert evidence.schema_version == "factorstrip.decomposition.v1"
+    assert evidence.subject_strategy_id == "VixSnap"
+    assert evidence.decision == "descriptive"
+    assert evidence.eligible_for_validation is False
+    assert evidence.eligible_for_promotion is False
+    assert evidence.promotion_eligible_validation is False
+
+    ledger = ConductorLedger(tmp_path / "conductor.sqlite")
+    ledger.ensure_strategy_release(StrategyRelease("VixSnap", "1.0.0"))
+    assert ledger.attach_strategy_release_evidence("VixSnap", "1.0.0", evidence) is True
+
+    decompositions = ledger.strategy_release_factor_decompositions("VixSnap", "1.0.0")
+    assert len(decompositions) == 1
+    assert decompositions[0]["evidence_id"] == evidence.evidence_id
+    assert decompositions[0]["decomposition"]["factor_betas"] == {
+        "MKT": 0.8,
+        "VALUE": -0.2,
+    }
+    assert decompositions[0]["methodology"]["model"] == "time_series_ols_with_intercept"
+
+    with pytest.raises(ValueError, match="requires promotion-eligible portable validation"):
+        ledger.transition_strategy_release(
+            "VixSnap", "1.0.0", "validated", reason="decomposition is descriptive only"
+        )
+
+
+def test_factorstrip_decomposition_refuses_promotional_flags_and_wrong_release(tmp_path) -> None:
+    promotional = _factorstrip(
+        tmp_path / "promotional.json", eligible_for_promotion=True
+    )
+    with pytest.raises(ValueError, match="must not be eligible for validation or promotion"):
+        load_portable_evidence(promotional)
+
+    evidence = load_portable_evidence(
+        _factorstrip(tmp_path / "vixsnap.json", strategy_id="VixSnap")
+    )
+    ledger = ConductorLedger(tmp_path / "conductor.sqlite")
+    ledger.ensure_strategy_release(StrategyRelease("ETSA", "1.0.0"))
+    with pytest.raises(ValueError, match="does not match strategy release"):
+        ledger.attach_strategy_release_evidence("ETSA", "1.0.0", evidence)

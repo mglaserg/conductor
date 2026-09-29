@@ -71,7 +71,7 @@ def main() -> None:
 
     evidence_ingest = sub.add_parser(
         "evidence-ingest",
-        help="verify and attach one Clockwork/EdgeLab evidence artifact to a strategy release",
+        help="verify and attach one Clockwork/EdgeLab/FactorStrip artifact to a strategy release",
     )
     evidence_ingest.add_argument("strategy_id")
     evidence_ingest.add_argument("path", type=Path)
@@ -287,6 +287,9 @@ def main() -> None:
             evidence_records = ledger.strategy_release_evidence(
                 release.strategy_id, release.version
             )
+            factor_decompositions = ledger.strategy_release_factor_decompositions(
+                release.strategy_id, release.version
+            )
             print(
                 json.dumps(
                     {
@@ -297,6 +300,7 @@ def main() -> None:
                         "artifact": evidence.summary(),
                         "evidence_ids": list(release.evidence_ids),
                         "evidence": evidence_records,
+                        "factor_decompositions": factor_decompositions,
                         "ready_for_validation": any(
                             item["artifact_type"] == "research"
                             and item["eligible_for_validation"]
@@ -334,12 +338,16 @@ def main() -> None:
         evidence_records = ledger.strategy_release_evidence(
             release.strategy_id, release.version
         )
+        factor_decompositions = ledger.strategy_release_factor_decompositions(
+            release.strategy_id, release.version
+        )
         payload = {
             "strategy_id": release.strategy_id,
             "version": release.version,
             "state": release.state.value,
             "evidence_ids": list(release.evidence_ids),
             "evidence": evidence_records,
+            "factor_decompositions": factor_decompositions,
             "allowed_transitions": [state.value for state in release.allowed_transitions()],
             "can_shadow": release.can_shadow(),
             "can_trade_live": release.can_trade_live(),

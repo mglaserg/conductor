@@ -146,6 +146,11 @@ The bridge is durable IPC, not a second portfolio ledger. Strategy ownership doe
 
 ### Transaction boundary
 
+Portable specialist evidence is another explicit boundary. Clockwork supplies research evidence,
+EdgeLab supplies validation evidence, and FactorStrip supplies descriptive factor decomposition.
+Conductor verifies and persists those artifacts, but only promotion-eligible validation evidence can
+satisfy `VALIDATED`; decomposition evidence never grants trading authority.
+
 There is no distributed transaction spanning the strategy process, Conductor ledger, bridge,
 Nautilus, and broker. Correctness therefore depends on:
 

@@ -887,12 +887,16 @@ class ConductorRuntimeApp:
         evidence = self.ledger.strategy_release_evidence(
             release.strategy_id, release.version
         )
+        factor_decompositions = self.ledger.strategy_release_factor_decompositions(
+            release.strategy_id, release.version
+        )
         return {
             "strategy_id": release.strategy_id,
             "version": release.version,
             "state": release.state.value,
             "evidence_ids": list(release.evidence_ids),
             "evidence": evidence,
+            "factor_decompositions": factor_decompositions,
             "ready_for_validation": any(
                 item["artifact_type"] == "research"
                 and item["eligible_for_validation"]

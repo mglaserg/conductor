@@ -235,6 +235,7 @@ def test_live_multi_account_allocation_and_execution_are_isolated(tmp_path, monk
             "state": "validated",
             "evidence_ids": ["edgelab:validation:reports/etsa-validation.json"],
             "evidence": [],
+            "factor_decompositions": [],
             "ready_for_validation": False,
             "ready_for_validated": False,
             "allowed_transitions": ["killed", "review", "shadow"],

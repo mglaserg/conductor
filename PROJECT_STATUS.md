@@ -83,9 +83,10 @@ cutover checklist in `docs/WINDOWS_ETSA_RPS_TLAQ_MIGRATION.md` are satisfied.
 - explicit audited release-admission transitions (`RESEARCH -> VALIDATED -> SHADOW -> LIVE`, plus
   REVIEW/KILLED), with lightweight CLI inspection/transition commands, shadow/cutover admission
   gates, and startup refusal when live order authority is enabled for a non-LIVE release;
-- durable append-only specialist evidence ingestion: Conductor verifies `clockwork.research.v1` and
-  `edgelab.validation.v1` content-addressed artifacts, stores payload/hash provenance, surfaces them
-  in release status, and refuses transitions into `VALIDATED` without promotion-eligible proof;
+- durable append-only specialist evidence ingestion: Conductor verifies `clockwork.research.v1`,
+  `edgelab.validation.v1`, and descriptive `factorstrip.decomposition.v1` content-addressed
+  artifacts, stores payload/hash provenance, surfaces FactorStrip decomposition summaries in release
+  status, and refuses transitions into `VALIDATED` without promotion-eligible validation proof;
 - `start_nautilus_workers.bat` for the current two-route Windows topology;
 - operator convenience wrappers `nautilus_start.bat`, `nautilus_status.bat`, and `nautilus_doctor.bat`;
 - dry-run-first, create-only route bootstrap with exact broker quantity conservation, automatic
@@ -99,7 +100,7 @@ paper, shadow, or production validation.
 
 ## Verification state
 
-- Full automated suite on 2026-09-29: **129 passed** in local verification.
+- Full automated suite on 2026-09-29: **132 passed** in local verification.
 - New multi-account coverage verifies:
   - independent broker NAVs and 85/15 + 100% strategy budgeting;
   - exact strategy membership/weight validation per route;
