@@ -8,6 +8,7 @@ from typing import Any
 
 from conductor.domain.models import SleeveAllocation
 from conductor.policy import MissingVolatilityBehavior, StrategyPolicy
+from conductor.protocol.release import StrategyReleaseState
 from conductor.routing import ExecutionRoute, RouteRegistry
 from conductor.runtime.models import EvidenceReference, NativeResultMode, StrategyMetadata, StrategyRunnerProfile
 
@@ -536,6 +537,9 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
                 mechanism=(str(item["mechanism"]) if item.get("mechanism") is not None else None),
                 research_source=(str(item["research_source"]) if item.get("research_source") is not None else None),
                 validation_state=str(item.get("validation_state", "research")),
+                release_state=StrategyReleaseState(
+                    str(item.get("release_state", "research"))
+                ).value,
                 evidence=tuple(
                     EvidenceReference(
                         producer=str(entry["producer"]),

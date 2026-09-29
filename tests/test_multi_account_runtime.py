@@ -82,6 +82,10 @@ live_orders_enabled = false
 result_mode = "target_weights"
 route_id = "ibkr_main"
 cwd = {cwd}
+version = "1.2.3"
+family = "statistical_arbitrage"
+release_state = "validated"
+evidence = [{{ producer = "edgelab", artifact_type = "validation", location = "reports/etsa-validation.json", version = "7" }}]
 command = {command(etsa)}
 [strategies.ETSA.seed]
 cash = 0
@@ -109,6 +113,16 @@ positions = {{ AAPL = 10 }}
         encoding="utf-8",
     )
     return config
+
+
+def test_invalid_strategy_release_state_is_rejected(tmp_path) -> None:
+    config_path = _multi_account_config(tmp_path)
+    text = config_path.read_text(encoding="utf-8")
+    text = text.replace('release_state = "validated"', 'release_state = "nonsense"', 1)
+    config_path.write_text(text, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="StrategyReleaseState"):
+        load_runtime_config(config_path)
 
 
 def test_named_portfolios_are_route_backed_and_default_to_broker_nav(tmp_path) -> None:
@@ -213,6 +227,17 @@ def test_live_multi_account_allocation_and_execution_are_isolated(tmp_path, monk
             "RPSchteroids": "0.15",
         }
         assert pools["ibkr_tlaq"]["nav"] == "75000"
+
+        strategies = {item["strategy_id"]: item for item in status["strategies"]}
+        assert strategies["ETSA"]["release"] == {
+            "strategy_id": "ETSA",
+            "version": "1.2.3",
+            "state": "validated",
+            "evidence_ids": ["edgelab:validation:reports/etsa-validation.json"],
+            "can_shadow": True,
+            "can_trade_live": False,
+        }
+        assert "release_state" not in strategies["ETSA"]["metadata"]
     finally:
         app.close()
 

@@ -28,6 +28,7 @@ from conductor.engine import ConductorEngine
 from conductor.ledger import ConductorLedger
 from conductor.orders import OrderPlanner
 from conductor.policy import StrategyPolicyEngine
+from conductor.protocol.release import StrategyRelease
 from conductor.portfolio_policy import PortfolioPolicyEngine
 from conductor.portfolio import PortfolioBuilder
 from conductor.rebalance import VirtualRebalanceBuffer
@@ -780,6 +781,7 @@ class ConductorRuntimeApp:
                 continue
             account = self.accounting.account_view(strategy_id, book_id=profile.book_id)
             current = runtime_by_key.get((strategy_id, profile.book_id))
+            release = StrategyRelease.from_metadata(strategy_id, profile.metadata)
             strategies.append(
                 {
                     "strategy_id": strategy_id,
@@ -795,7 +797,6 @@ class ConductorRuntimeApp:
                         "mechanism": profile.metadata.mechanism,
                         "research_source": profile.metadata.research_source,
                         "validation_state": profile.metadata.validation_state,
-                        "release_state": profile.metadata.release_state,
                         "evidence": [
                             {
                                 "producer": item.producer,
@@ -805,6 +806,14 @@ class ConductorRuntimeApp:
                             }
                             for item in profile.metadata.evidence
                         ],
+                    },
+                    "release": {
+                        "strategy_id": release.strategy_id,
+                        "version": release.version,
+                        "state": release.state.value,
+                        "evidence_ids": list(release.evidence_ids),
+                        "can_shadow": release.can_shadow(),
+                        "can_trade_live": release.can_trade_live(),
                     },
                     "allocated_capital": str(account.allocated_capital),
                     "cash": str(account.cash),
