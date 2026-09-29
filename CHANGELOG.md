@@ -4,6 +4,10 @@
 
 ### Added
 
+- Durable `StrategyRelease` registry in the Conductor ledger, keyed by strategy/version. Configured
+  metadata seeds a release only on first registration; subsequent startup reads the persisted state,
+  while evidence changes for the same version fail closed and require a version bump.
+
 - Explicit versioned `StrategyPolicy` and composed `PortfolioPolicyEngine` stages between normalized
   strategy intent/capital translation and broker netting. Policies support strategy risk budgets,
   opt-in target-volatility scaling, freshness limits, gross-leverage and position concentration
@@ -27,7 +31,10 @@
 
 ### Validation
 
-- Full local suite: 115 passed.
+- Full local suite: 119 passed.
+- Added regressions proving persisted release state wins over later config edits and release evidence
+  is immutable within a version.
+
 - Added regressions for strategy leverage/volatility/freshness policy, hold-current invariance,
   per-strategy deadbands, sample covariance, native metadata passthrough, and decision lineage.
 

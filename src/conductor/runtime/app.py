@@ -63,6 +63,8 @@ class ConductorRuntimeApp:
         self.run_root.mkdir(parents=True, exist_ok=True)
         self.ledger = ConductorLedger(self.state_db)
 
+        self._initialize_strategy_releases()
+
         self.portfolios_by_route: dict[str, PortfolioConfig] = {
             item.route_id: item
             for item in config.portfolios.values()
@@ -315,6 +317,13 @@ class ConductorRuntimeApp:
                 fallback_order=pool.fallback_order,
             )
         return decisions
+
+    def _initialize_strategy_releases(self) -> None:
+        for strategy_id, profile in self.config.strategies.items():
+            if profile.route_id not in self.route_scope:
+                continue
+            configured = StrategyRelease.from_metadata(strategy_id, profile.metadata)
+            self.ledger.ensure_strategy_release(configured)
 
     def _initialize_strategy_accounts(self, *, paper: bool) -> list[dict[str, str]]:
         initialized: list[dict[str, str]] = []
@@ -781,7 +790,11 @@ class ConductorRuntimeApp:
                 continue
             account = self.accounting.account_view(strategy_id, book_id=profile.book_id)
             current = runtime_by_key.get((strategy_id, profile.book_id))
-            release = StrategyRelease.from_metadata(strategy_id, profile.metadata)
+            release = self.ledger.strategy_release(strategy_id, profile.metadata.version)
+            if release is None:
+                raise RuntimeError(
+                    f"strategy release {strategy_id}/{profile.metadata.version} is not registered"
+                )
             strategies.append(
                 {
                     "strategy_id": strategy_id,

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 from conductor.domain.models import ZERO, ExposureType, StrategyIntent, VirtualTarget
+from conductor.protocol.release import StrategyRelease, StrategyReleaseState
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +104,16 @@ class ConductorLedger:
                     lifecycle TEXT NOT NULL DEFAULT 'active',
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (strategy_id, book_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS strategy_releases (
+                    strategy_id TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    evidence_ids_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (strategy_id, version)
                 );
 
                 CREATE TABLE IF NOT EXISTS strategy_runs (
@@ -705,6 +716,95 @@ class ConductorLedger:
             for row in rows
         ]
 
+    def ensure_strategy_release(self, release: StrategyRelease) -> StrategyRelease:
+        """Register a release once and return Conductor's persisted canonical record.
+
+        Configuration may seed a new release, but once a (strategy_id, version) exists the ledger
+        owns its state. Evidence is immutable for a version: changing it requires a new version.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        created_at = release.created_at.astimezone(timezone.utc).isoformat()
+        state = StrategyReleaseState(release.state).value
+        evidence_ids_json = json.dumps(list(release.evidence_ids), separators=(",", ":"))
+
+        with self._connect() as conn:
+            existing = conn.execute(
+                """
+                SELECT state, evidence_ids_json, created_at
+                FROM strategy_releases
+                WHERE strategy_id=? AND version=?
+                """,
+                (release.strategy_id, release.version),
+            ).fetchone()
+            if existing is None:
+                conn.execute(
+                    """
+                    INSERT INTO strategy_releases(
+                        strategy_id, version, state, evidence_ids_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        release.strategy_id,
+                        release.version,
+                        state,
+                        evidence_ids_json,
+                        created_at,
+                        now,
+                    ),
+                )
+                self._append_event_on_conn(
+                    conn,
+                    "strategy.release_registered",
+                    {
+                        "strategy_id": release.strategy_id,
+                        "version": release.version,
+                        "state": state,
+                        "evidence_ids": list(release.evidence_ids),
+                    },
+                    now,
+                )
+                return StrategyRelease(
+                    strategy_id=release.strategy_id,
+                    version=release.version,
+                    state=StrategyReleaseState(state),
+                    evidence_ids=release.evidence_ids,
+                    created_at=datetime.fromisoformat(created_at),
+                )
+
+            evidence_ids = tuple(json.loads(existing["evidence_ids_json"]))
+            if evidence_ids != release.evidence_ids:
+                raise RuntimeError(
+                    f"strategy release {release.strategy_id}/{release.version} evidence differs "
+                    "from the persisted release; publish a new version instead of mutating "
+                    "a release"
+                )
+            return StrategyRelease(
+                strategy_id=release.strategy_id,
+                version=release.version,
+                state=StrategyReleaseState(existing["state"]),
+                evidence_ids=evidence_ids,
+                created_at=datetime.fromisoformat(existing["created_at"]),
+            )
+
+    def strategy_release(self, strategy_id: str, version: str) -> StrategyRelease | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT state, evidence_ids_json, created_at
+                FROM strategy_releases
+                WHERE strategy_id=? AND version=?
+                """,
+                (strategy_id, version),
+            ).fetchone()
+        if row is None:
+            return None
+        return StrategyRelease(
+            strategy_id=strategy_id,
+            version=version,
+            state=StrategyReleaseState(row["state"]),
+            evidence_ids=tuple(json.loads(row["evidence_ids_json"])),
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
 
     def ensure_strategy(
         self, strategy_id: str, *, book_id: str = "main", lifecycle: str = "active"

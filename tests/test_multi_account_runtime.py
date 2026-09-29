@@ -633,3 +633,27 @@ def test_doctor_blocks_missing_required_policy_metadata(tmp_path, monkeypatch) -
         assert any("missing volatility metadata" in issue for issue in doctor["blocking_issues"])
     finally:
         app.close()
+
+
+def test_status_release_state_comes_from_persisted_release(tmp_path) -> None:
+    config_path = _multi_account_config(tmp_path)
+    with config_path.open("a", encoding="utf-8") as handle:
+        handle.write("\n[paper.portfolio_navs]\nibkr_main = 120000\nibkr_tlaq = 80000\n")
+
+    app = ConductorRuntimeApp.from_path(config_path, paper=True)
+    try:
+        strategies = {item["strategy_id"]: item for item in app.status()["strategies"]}
+        assert strategies["ETSA"]["release"]["state"] == "validated"
+    finally:
+        app.close()
+
+    text = config_path.read_text(encoding="utf-8")
+    text = text.replace('release_state = "validated"', 'release_state = "research"', 1)
+    config_path.write_text(text, encoding="utf-8")
+
+    app = ConductorRuntimeApp.from_path(config_path, paper=True)
+    try:
+        strategies = {item["strategy_id"]: item for item in app.status()["strategies"]}
+        assert strategies["ETSA"]["release"]["state"] == "validated"
+    finally:
+        app.close()

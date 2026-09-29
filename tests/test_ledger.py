@@ -1,10 +1,14 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from decimal import Decimal
 from threading import Barrier
 
+import pytest
+
 from conductor.domain.models import ExposureType, VirtualTarget
 from conductor.ledger import ConductorLedger
+from conductor.protocol.release import StrategyRelease, StrategyReleaseState
 
 
 def test_ledger_persists_targets_and_committed_virtual_ownership(tmp_path) -> None:
@@ -76,3 +80,58 @@ def test_strategy_run_acquisition_is_atomic_across_process_connections(tmp_path)
         event for event in ledgers[0].events() if event["event_type"] == "strategy.run_rejected"
     )
     assert json.loads(rejection["payload_json"])["reason"] == "concurrent_run"
+
+
+def test_strategy_release_is_persisted_and_config_state_does_not_overwrite_it(tmp_path) -> None:
+    ledger = ConductorLedger(tmp_path / "conductor.sqlite")
+    created_at = datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc)
+    release = StrategyRelease(
+        strategy_id="ETSA",
+        version="1.2.3",
+        state=StrategyReleaseState.VALIDATED,
+        evidence_ids=("edgelab:validation:report.json",),
+        created_at=created_at,
+    )
+
+    registered = ledger.ensure_strategy_release(release)
+    assert registered == release
+
+    configured_again = StrategyRelease(
+        strategy_id="ETSA",
+        version="1.2.3",
+        state=StrategyReleaseState.RESEARCH,
+        evidence_ids=release.evidence_ids,
+    )
+    persisted = ledger.ensure_strategy_release(configured_again)
+
+    assert persisted.state == StrategyReleaseState.VALIDATED
+    assert persisted.created_at == created_at
+    assert ledger.strategy_release("ETSA", "1.2.3") == persisted
+    registered_events = [
+        event
+        for event in ledger.events()
+        if event["event_type"] == "strategy.release_registered"
+    ]
+    assert len(registered_events) == 1
+
+
+def test_strategy_release_evidence_is_immutable_within_a_version(tmp_path) -> None:
+    ledger = ConductorLedger(tmp_path / "conductor.sqlite")
+    ledger.ensure_strategy_release(
+        StrategyRelease(
+            strategy_id="ETSA",
+            version="1.2.3",
+            state=StrategyReleaseState.VALIDATED,
+            evidence_ids=("edgelab:validation:report-v1.json",),
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="publish a new version"):
+        ledger.ensure_strategy_release(
+            StrategyRelease(
+                strategy_id="ETSA",
+                version="1.2.3",
+                state=StrategyReleaseState.VALIDATED,
+                evidence_ids=("edgelab:validation:report-v2.json",),
+            )
+        )

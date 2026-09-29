@@ -117,7 +117,10 @@ outcome. A merely asynchronous submission remains submitted while broker state m
 ### Conductor ledger
 
 The main SQLite ledger is the durable source for accepted events, desired books, runtime books,
-strategy accounts, virtual positions, lifecycle, strategy runs, instrument cache, and audit data.
+strategy accounts, virtual positions, operational lifecycle, strategy releases, strategy runs,
+instrument cache, and audit data. A configured strategy version seeds its release only when that
+(strategy, version) is first seen; thereafter the persisted release state is canonical, and changing
+evidence requires a new version rather than mutating the admitted release.
 
 The ledger distinguishes desired state from committed economic ownership. This distinction is
 necessary whenever execution is asynchronous, rejected, partially filled, or interrupted.
