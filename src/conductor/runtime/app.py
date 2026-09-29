@@ -28,7 +28,7 @@ from conductor.engine import ConductorEngine
 from conductor.ledger import ConductorLedger
 from conductor.orders import OrderPlanner
 from conductor.policy import StrategyPolicyEngine
-from conductor.protocol.release import StrategyRelease
+from conductor.protocol.release import StrategyRelease, StrategyReleaseState
 from conductor.portfolio_policy import PortfolioPolicyEngine
 from conductor.portfolio import PortfolioBuilder
 from conductor.rebalance import VirtualRebalanceBuffer
@@ -64,6 +64,18 @@ class ConductorRuntimeApp:
         self.ledger = ConductorLedger(self.state_db)
 
         self._initialize_strategy_releases()
+        if not paper:
+            for row in self.ledger.shadow_routes(active_only=True):
+                route_id = row["route_id"]
+                if route_id not in self.route_scope:
+                    continue
+                route_cfg = config.routes[route_id]
+                if route_cfg.live_orders_enabled:
+                    raise ValueError(
+                        f"route {route_id} has active external shadow authority but "
+                        "live_orders_enabled=true; disable Conductor orders before shadowing"
+                    )
+            self._validate_live_release_authority()
 
         self.portfolios_by_route: dict[str, PortfolioConfig] = {
             item.route_id: item
@@ -99,18 +111,6 @@ class ConductorRuntimeApp:
                     lazy_providers[route_id] = adapter.instrument_spec
                 else:
                     raise ValueError(f"unsupported adapter {route_cfg.route.adapter!r}")
-
-        if not paper:
-            for row in self.ledger.shadow_routes(active_only=True):
-                route_id = row["route_id"]
-                if route_id not in self.route_scope:
-                    continue
-                route_cfg = config.routes[route_id]
-                if route_cfg.live_orders_enabled:
-                    raise ValueError(
-                        f"route {route_id} has active external shadow authority but "
-                        "live_orders_enabled=true; disable Conductor orders before shadowing"
-                    )
 
         self.portfolio_navs = self._resolve_portfolio_navs(paper=paper)
         self.allocation_decisions = self._resolve_allocations()
@@ -325,6 +325,72 @@ class ConductorRuntimeApp:
             configured = StrategyRelease.from_metadata(strategy_id, profile.metadata)
             self.ledger.ensure_strategy_release(configured)
 
+    def _strategy_release(self, strategy_id: str) -> StrategyRelease:
+        profile = self.config.strategies[strategy_id]
+        release = self.ledger.strategy_release(strategy_id, profile.metadata.version)
+        if release is None:
+            raise RuntimeError(
+                f"strategy release {strategy_id}/{profile.metadata.version} is not registered"
+            )
+        return release
+
+    def _validate_live_release_authority(self) -> None:
+        """Fail closed before constructing a runtime with live order authority."""
+        for route_id in sorted(self.route_scope):
+            route = self.config.routes.get(route_id)
+            if route is None or not route.live_orders_enabled:
+                continue
+            blocked = []
+            for strategy_id, profile in sorted(self.config.strategies.items()):
+                if profile.route_id != route_id:
+                    continue
+                lifecycle = self.ledger.strategy_lifecycle(
+                    strategy_id, book_id=profile.book_id
+                )
+                if lifecycle in {"disabled", "retired"}:
+                    continue
+                release = self._strategy_release(strategy_id)
+                if not release.can_trade_live():
+                    blocked.append(
+                        f"{strategy_id}/{release.version}={release.state.value}"
+                    )
+            if blocked:
+                raise ValueError(
+                    f"route {route_id} has live_orders_enabled=true but strategy releases are "
+                    f"not LIVE: {', '.join(blocked)}"
+                )
+
+    def _require_shadow_admission(self, route_id: str) -> None:
+        blocked = []
+        for strategy_id, profile in sorted(self.config.strategies.items()):
+            if profile.route_id != route_id:
+                continue
+            if self.ledger.strategy_lifecycle(strategy_id, book_id=profile.book_id) != "active":
+                continue
+            release = self._strategy_release(strategy_id)
+            if not release.can_shadow():
+                blocked.append(f"{strategy_id}/{release.version}={release.state.value}")
+        if blocked:
+            raise ValueError(
+                f"route {route_id} has releases not admitted for shadow: {', '.join(blocked)}"
+            )
+
+    def _require_shadow_cutover_state(self, route_id: str) -> None:
+        blocked = []
+        for strategy_id, profile in sorted(self.config.strategies.items()):
+            if profile.route_id != route_id:
+                continue
+            if self.ledger.strategy_lifecycle(strategy_id, book_id=profile.book_id) != "active":
+                continue
+            release = self._strategy_release(strategy_id)
+            if release.state is not StrategyReleaseState.SHADOW:
+                blocked.append(f"{strategy_id}/{release.version}={release.state.value}")
+        if blocked:
+            raise ValueError(
+                f"route {route_id} cannot cut over until every release is SHADOW: "
+                f"{', '.join(blocked)}"
+            )
+
     def _initialize_strategy_accounts(self, *, paper: bool) -> list[dict[str, str]]:
         initialized: list[dict[str, str]] = []
         for strategy_id, profile in self.config.strategies.items():
@@ -451,6 +517,28 @@ class ConductorRuntimeApp:
             raise KeyError(f"unknown configured strategy: {strategy_id}")
         return matches[0]
 
+    def activate_strategy(self, strategy_id: str) -> str:
+        canonical_id = self.resolve_strategy_id(strategy_id)
+        profile = self.config.strategies[canonical_id]
+        release = self._strategy_release(canonical_id)
+        route = self.config.routes[profile.route_id]
+        shadow = self.ledger.shadow_route(profile.route_id)
+        if route.live_orders_enabled and not release.can_trade_live():
+            raise ValueError(
+                f"strategy release {canonical_id}/{release.version} must be LIVE before "
+                f"activation on live route {profile.route_id}"
+            )
+        if shadow is not None and shadow["active"] and not release.can_shadow():
+            raise ValueError(
+                f"strategy release {canonical_id}/{release.version} is not admitted for shadow"
+            )
+        if release.state in {StrategyReleaseState.REVIEW, StrategyReleaseState.KILLED}:
+            raise ValueError(
+                f"strategy release {canonical_id}/{release.version} is {release.state.value.upper()}"
+            )
+        self.orchestrator.activate(profile)
+        return canonical_id
+
     def run_strategy(self, strategy_id: str, *, trigger: str = "manual") -> StrategyRunOutcome:
         canonical_id = self.resolve_strategy_id(strategy_id)
         profile = self.config.strategies[canonical_id]
@@ -458,6 +546,16 @@ class ConductorRuntimeApp:
             raise RuntimeError(
                 f"strategy {canonical_id} is on route {profile.route_id}, outside runtime scope "
                 f"{sorted(self.route_scope)}"
+            )
+        release = self._strategy_release(canonical_id)
+        if release.state is StrategyReleaseState.KILLED:
+            raise RuntimeError(
+                f"strategy release {canonical_id}/{release.version} is KILLED"
+            )
+        if release.state is StrategyReleaseState.REVIEW and not self.paper_mode:
+            raise RuntimeError(
+                f"strategy release {canonical_id}/{release.version} is in REVIEW; "
+                "only offline paper runs are permitted"
             )
         shadow = self.ledger.shadow_route(profile.route_id)
         if shadow is not None and shadow["active"] and len(self._route_profiles(profile.route_id)) == 1:
@@ -688,6 +786,7 @@ class ConductorRuntimeApp:
     def promote_shadow_route(self, route_id: str) -> dict:
         if self.config.routes[route_id].live_orders_enabled:
             raise ValueError("promotion must occur while Conductor live orders are still disabled")
+        self._require_shadow_cutover_state(route_id)
         check = self.shadow_reconciliation(route_id)
         if not check["reconciled"]:
             raise ValueError(f"shadow route {route_id} does not reconcile to broker; refusing promotion")
@@ -716,6 +815,7 @@ class ConductorRuntimeApp:
         }
 
     def shadow_cycle(self, route_id: str, *, trigger: str = "shadow-cycle") -> dict:
+        self._require_shadow_admission(route_id)
         shadow = self.ledger.shadow_route(route_id)
         if shadow is None or not shadow["active"]:
             raise ValueError(f"route {route_id} has no active shadow mirror")
@@ -780,6 +880,22 @@ class ConductorRuntimeApp:
             ],
         }
 
+    def _release_status_payload(self, release: StrategyRelease) -> dict[str, object]:
+        transitions = self.ledger.strategy_release_transitions(
+            release.strategy_id, release.version
+        )
+        return {
+            "strategy_id": release.strategy_id,
+            "version": release.version,
+            "state": release.state.value,
+            "evidence_ids": list(release.evidence_ids),
+            "allowed_transitions": [state.value for state in release.allowed_transitions()],
+            "can_shadow": release.can_shadow(),
+            "can_trade_live": release.can_trade_live(),
+            "transition_count": len(transitions),
+            "last_transition": transitions[-1] if transitions else None,
+        }
+
     def status(self) -> dict:
         runtime_by_key = {
             (intent.strategy_id, intent.book_id): intent for intent in self.ledger.runtime_intents()
@@ -820,14 +936,7 @@ class ConductorRuntimeApp:
                             for item in profile.metadata.evidence
                         ],
                     },
-                    "release": {
-                        "strategy_id": release.strategy_id,
-                        "version": release.version,
-                        "state": release.state.value,
-                        "evidence_ids": list(release.evidence_ids),
-                        "can_shadow": release.can_shadow(),
-                        "can_trade_live": release.can_trade_live(),
-                    },
+                    "release": self._release_status_payload(release),
                     "allocated_capital": str(account.allocated_capital),
                     "cash": str(account.cash),
                     "equity": str(account.equity),

@@ -128,6 +128,18 @@ because that companion strategy did not run in the same cycle.
 **Reason:** portfolio policy may change desired risk, but it must not manufacture an ownership
 transfer between strategies that share a broker account.
 
+## S16 — Release admission gates authority but never grants it
+
+Strategy-version admission uses the durable `RESEARCH -> VALIDATED -> SHADOW -> LIVE` state machine.
+Shadow cutover requires `SHADOW`; live-order runtime startup requires every strategy release on the
+route to be `LIVE`. `REVIEW` and `KILLED` disable future strategy runs.
+
+A `LIVE` release is only a prerequisite. It never flips `live_orders_enabled` or transfers broker
+authority by itself.
+
+**Reason:** research approval, operational ownership, and broker execution authority are distinct
+controls. Collapsing them into one flag makes accidental promotion too easy.
+
 ## Change-review checklist
 
 For every execution, accounting, routing, lifecycle, or persistence change, reviewers should answer:

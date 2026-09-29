@@ -168,6 +168,7 @@ bridge_db = "data/tlaq.sqlite"
 live_orders_enabled = false
 
 [strategies.ETSA]
+release_state = "shadow"
 result_mode = "target_weights"
 route_id = "ibkr_main"
 cwd = {cwd}
@@ -177,6 +178,7 @@ cash = 0
 positions = {{ AEP = -59 }}
 
 [strategies.RPSchteroids]
+release_state = "shadow"
 result_mode = "target_weights"
 route_id = "ibkr_main"
 cwd = {cwd}
@@ -186,6 +188,7 @@ cash = 0
 positions = {{ EMB = 86 }}
 
 [strategies.TLAQ]
+release_state = "shadow"
 result_mode = "position_deltas"
 route_id = "ibkr_tlaq"
 cwd = {cwd}

@@ -116,6 +116,22 @@ class ConductorLedger:
                     PRIMARY KEY (strategy_id, version)
                 );
 
+                CREATE TABLE IF NOT EXISTS strategy_release_transitions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy_id TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    from_state TEXT NOT NULL,
+                    to_state TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    transitioned_at TEXT NOT NULL,
+                    FOREIGN KEY (strategy_id, version)
+                        REFERENCES strategy_releases(strategy_id, version)
+                );
+
+                CREATE INDEX IF NOT EXISTS ix_strategy_release_transitions_release
+                    ON strategy_release_transitions(strategy_id, version, id);
+
                 CREATE TABLE IF NOT EXISTS strategy_runs (
                     run_id TEXT PRIMARY KEY,
                     strategy_id TEXT NOT NULL,
@@ -805,6 +821,100 @@ class ConductorLedger:
             evidence_ids=tuple(json.loads(row["evidence_ids_json"])),
             created_at=datetime.fromisoformat(row["created_at"]),
         )
+
+    def transition_strategy_release(
+        self,
+        strategy_id: str,
+        version: str,
+        target_state: StrategyReleaseState | str,
+        *,
+        reason: str,
+        actor: str = "operator",
+    ) -> StrategyRelease:
+        """Atomically transition one registered release and record durable audit evidence."""
+        target = StrategyReleaseState(target_state)
+        if not reason.strip():
+            raise ValueError("release transition reason must be non-empty")
+        if not actor.strip():
+            raise ValueError("release transition actor must be non-empty")
+
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            # Serialize admission changes across concurrent local CLI/process callers.
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT state, evidence_ids_json, created_at
+                FROM strategy_releases
+                WHERE strategy_id=? AND version=?
+                """,
+                (strategy_id, version),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown strategy release: {strategy_id}/{version}")
+
+            current = StrategyRelease(
+                strategy_id=strategy_id,
+                version=version,
+                state=StrategyReleaseState(row["state"]),
+                evidence_ids=tuple(json.loads(row["evidence_ids_json"])),
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+            transitioned = current.transitioned(target)
+            if transitioned.state == current.state:
+                return current
+
+            conn.execute(
+                """
+                UPDATE strategy_releases
+                SET state=?, updated_at=?
+                WHERE strategy_id=? AND version=?
+                """,
+                (target.value, now, strategy_id, version),
+            )
+            conn.execute(
+                """
+                INSERT INTO strategy_release_transitions(
+                    strategy_id, version, from_state, to_state, reason, actor, transitioned_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    strategy_id,
+                    version,
+                    current.state.value,
+                    target.value,
+                    reason.strip(),
+                    actor.strip(),
+                    now,
+                ),
+            )
+            self._append_event_on_conn(
+                conn,
+                "strategy.release_transitioned",
+                {
+                    "strategy_id": strategy_id,
+                    "version": version,
+                    "from_state": current.state.value,
+                    "to_state": target.value,
+                    "reason": reason.strip(),
+                    "actor": actor.strip(),
+                },
+                now,
+            )
+            return transitioned
+
+    def strategy_release_transitions(self, strategy_id: str, version: str) -> list[dict[str, str]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT from_state, to_state, reason, actor, transitioned_at
+                FROM strategy_release_transitions
+                WHERE strategy_id=? AND version=?
+                ORDER BY id
+                """,
+                (strategy_id, version),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def ensure_strategy(
         self, strategy_id: str, *, book_id: str = "main", lifecycle: str = "active"

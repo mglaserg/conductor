@@ -234,8 +234,11 @@ def test_live_multi_account_allocation_and_execution_are_isolated(tmp_path, monk
             "version": "1.2.3",
             "state": "validated",
             "evidence_ids": ["edgelab:validation:reports/etsa-validation.json"],
+            "allowed_transitions": ["killed", "review", "shadow"],
             "can_shadow": True,
             "can_trade_live": False,
+            "transition_count": 0,
+            "last_transition": None,
         }
         assert "release_state" not in strategies["ETSA"]["metadata"]
     finally:

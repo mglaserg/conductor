@@ -45,6 +45,30 @@ def main() -> None:
         help="inspect the separate offline paper database",
     )
 
+    release_status = sub.add_parser(
+        "release-status", help="show durable admission state for one configured strategy release"
+    )
+    release_status.add_argument("strategy_id")
+    release_status.add_argument("--config", default="conductor.toml", type=Path)
+
+    release_transition = sub.add_parser(
+        "release-transition",
+        help="apply one audited strategy-release admission transition",
+    )
+    release_transition.add_argument("strategy_id")
+    release_transition.add_argument(
+        "state", choices=("research", "validated", "shadow", "live", "review", "killed")
+    )
+    release_transition.add_argument("--config", default="conductor.toml", type=Path)
+    release_transition.add_argument(
+        "--reason", required=True, help="durable operator reason/evidence summary for the transition"
+    )
+    release_transition.add_argument("--actor", default="operator")
+    release_transition.add_argument(
+        "--confirm",
+        help="required; must exactly match <canonical-strategy-id>:<target-state>",
+    )
+
     doctor = sub.add_parser(
         "doctor", help="read-only authority-aware reconciliation check"
     )
@@ -205,6 +229,73 @@ def main() -> None:
                 ]
             )
         )
+
+    if args.command in {"release-status", "release-transition"}:
+        from conductor.config import load_runtime_config
+        from conductor.ledger import ConductorLedger
+        from conductor.protocol.release import StrategyRelease, StrategyReleaseState
+
+        config = load_runtime_config(args.config)
+        matches = [
+            configured
+            for configured in config.strategies
+            if configured.casefold() == args.strategy_id.casefold()
+        ]
+        if len(matches) != 1:
+            raise SystemExit(f"unknown configured strategy: {args.strategy_id}")
+        strategy_id = matches[0]
+        profile = config.strategies[strategy_id]
+        if args.command == "release-transition":
+            target = StrategyReleaseState(args.state)
+            expected_confirmation = f"{strategy_id}:{target.value}"
+            if args.confirm != expected_confirmation:
+                raise SystemExit(
+                    "REFUSED: release admission changes durable trading authority; pass "
+                    f"--confirm {expected_confirmation}"
+                )
+
+        config.state_db.parent.mkdir(parents=True, exist_ok=True)
+        ledger = ConductorLedger(config.state_db)
+        try:
+            release = ledger.ensure_strategy_release(
+                StrategyRelease.from_metadata(strategy_id, profile.metadata)
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise SystemExit(f"REFUSED: {exc}") from exc
+
+        if args.command == "release-transition":
+            try:
+                release = ledger.transition_strategy_release(
+                    strategy_id,
+                    release.version,
+                    target,
+                    reason=args.reason,
+                    actor=args.actor,
+                )
+                if target in {StrategyReleaseState.REVIEW, StrategyReleaseState.KILLED}:
+                    ledger.set_strategy_lifecycle(
+                        strategy_id, "disabled", book_id=profile.book_id
+                    )
+            except (KeyError, ValueError) as exc:
+                raise SystemExit(f"REFUSED: {exc}") from exc
+
+        payload = {
+            "strategy_id": release.strategy_id,
+            "version": release.version,
+            "state": release.state.value,
+            "evidence_ids": list(release.evidence_ids),
+            "allowed_transitions": [state.value for state in release.allowed_transitions()],
+            "can_shadow": release.can_shadow(),
+            "can_trade_live": release.can_trade_live(),
+            "operational_lifecycle": ledger.strategy_lifecycle(
+                strategy_id, book_id=profile.book_id
+            ),
+            "transitions": ledger.strategy_release_transitions(
+                release.strategy_id, release.version
+            ),
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
 
     if args.command in {
         "run", "status", "doctor", "bootstrap", "shadow-refresh", "shadow-cycle",
@@ -413,7 +504,10 @@ def main() -> None:
                 raise SystemExit(str(exc)) from exc
             profile = app.config.strategies[canonical_id]
             if args.command == "activate":
-                app.orchestrator.activate(profile)
+                try:
+                    app.activate_strategy(canonical_id)
+                except ValueError as exc:
+                    raise SystemExit(f"REFUSED: {exc}") from exc
                 print(f"ACTIVE {canonical_id}/{profile.book_id}")
                 return
             if args.command == "disable":

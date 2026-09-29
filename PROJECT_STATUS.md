@@ -1,6 +1,6 @@
 # Conductor project status
 
-Last reviewed: **2026-09-28**
+Last reviewed: **2026-09-29**
 
 This is the canonical handoff document for the repository's current state. `ROADMAP.md` describes
 where the product is going; this file describes what is true now and what should happen next.
@@ -80,6 +80,9 @@ cutover checklist in `docs/WINDOWS_ETSA_RPS_TLAQ_MIGRATION.md` are satisfied.
   scheduler and migration helpers;
 - durable strategy-release registry keyed by strategy/version; configuration seeds new releases,
   while persisted release state remains canonical and evidence cannot mutate without a version bump;
+- explicit audited release-admission transitions (`RESEARCH -> VALIDATED -> SHADOW -> LIVE`, plus
+  REVIEW/KILLED), with lightweight CLI inspection/transition commands, shadow/cutover admission
+  gates, and startup refusal when live order authority is enabled for a non-LIVE release;
 - `start_nautilus_workers.bat` for the current two-route Windows topology;
 - operator convenience wrappers `nautilus_start.bat`, `nautilus_status.bat`, and `nautilus_doctor.bat`;
 - dry-run-first, create-only route bootstrap with exact broker quantity conservation, automatic
@@ -93,7 +96,7 @@ paper, shadow, or production validation.
 
 ## Verification state
 
-- Full automated suite on 2026-09-29: **119 passed** in local verification.
+- Full automated suite on 2026-09-29: **126 passed** in local verification.
 - New multi-account coverage verifies:
   - independent broker NAVs and 85/15 + 100% strategy budgeting;
   - exact strategy membership/weight validation per route;

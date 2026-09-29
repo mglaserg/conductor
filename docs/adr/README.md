@@ -22,3 +22,4 @@ Current records:
 6. `0006-route-backed-capital-pools.md`
 7. `0007-external-authority-shadow-mirror.md`
 8. `0008-explicit-strategy-and-portfolio-policy.md`
+9. `0009-durable-strategy-release-admission.md`

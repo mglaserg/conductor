@@ -70,6 +70,8 @@ Windows equity strategies without rewriting their strategy logic.
 - initial US-equity canonical mapping to IBKR SMART instruments;
 - strategy activate, disable, retire, status, doctor, worker-status, and dry-run-first route
   ownership bootstrap commands;
+- durable strategy-release admission with audited `RESEARCH -> VALIDATED -> SHADOW -> LIVE`
+  transitions, REVIEW/KILLED handling, shadow/cutover gates, and fail-closed live-authority startup;
 - read-only local dashboard;
 - Windows Task Scheduler helpers and an operator migration runbook.
 - portable offline `run --paper`/`status --paper` execution with a separate SQLite source of truth,

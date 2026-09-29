@@ -122,6 +122,13 @@ instrument cache, and audit data. A configured strategy version seeds its releas
 (strategy, version) is first seen; thereafter the persisted release state is canonical, and changing
 evidence requires a new version rather than mutating the admitted release.
 
+Release admission is deliberately separate from the operational book lifecycle. A release advances
+through `RESEARCH -> VALIDATED -> SHADOW -> LIVE`, with `REVIEW` and terminal `KILLED` exception
+states. Transitions are explicit, persisted, audited, and fail closed. Admission gates shadow/cutover
+and live authority, but never enables broker submission on its own: route configuration must still
+explicitly set `live_orders_enabled=true`, and runtime startup refuses that authority unless every
+strategy release on the route is LIVE.
+
 The ledger distinguishes desired state from committed economic ownership. This distinction is
 necessary whenever execution is asynchronous, rejected, partially filled, or interrupted.
 

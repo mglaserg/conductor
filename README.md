@@ -432,6 +432,8 @@ uv run conductor dashboard --config conductor.toml
 
 ## Strategy lifecycle
 
+Operational lifecycle controls whether an existing strategy book may run:
+
 ```powershell
 uv run conductor disable ETSA --config conductor.toml
 uv run conductor activate ETSA --config conductor.toml
@@ -440,6 +442,26 @@ uv run conductor retire ETSA --config conductor.toml --confirm ETSA
 
 `disable` preserves current ownership and blocks future runs. `retire` targets the strategy book to
 zero and only becomes retired after reconciliation. History is never deleted.
+
+Strategy **release admission** is separate and version-specific. Inspect or advance the canonical
+release without starting a broker runtime:
+
+```powershell
+uv run conductor release-status ETSA --config conductor.toml
+uv run conductor release-transition ETSA validated --config conductor.toml `
+  --reason "validation evidence accepted" --confirm ETSA:validated
+uv run conductor release-transition ETSA shadow --config conductor.toml `
+  --reason "shadow admission approved" --confirm ETSA:shadow
+uv run conductor release-transition ETSA live --config conductor.toml `
+  --reason "cutover evidence approved" --confirm ETSA:live
+```
+
+The forward path is `RESEARCH -> VALIDATED -> SHADOW -> LIVE`. `REVIEW` and `KILLED` disable future
+runs; a reviewed release must re-enter through `VALIDATED`, while `KILLED` is terminal for that
+version. Shadow cycles require at least `VALIDATED`, `shadow-promote` requires exactly `SHADOW`, and
+`live_orders_enabled=true` is refused unless every configured release on the route is exactly
+`LIVE`. A LIVE release still does **not** enable orders by itself; the route-level live-order switch
+remains an independent explicit operator action.
 
 ## Capital allocation and risk
 

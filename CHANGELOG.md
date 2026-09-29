@@ -7,6 +7,9 @@
 - Durable `StrategyRelease` registry in the Conductor ledger, keyed by strategy/version. Configured
   metadata seeds a release only on first registration; subsequent startup reads the persisted state,
   while evidence changes for the same version fail closed and require a version bump.
+- Audited strategy-release admission state machine with `release-status` and `release-transition`
+  CLI commands. Transitions are persisted with actor/reason history; REVIEW/KILLED disable the
+  operational strategy lifecycle without deleting ownership.
 
 - Explicit versioned `StrategyPolicy` and composed `PortfolioPolicyEngine` stages between normalized
   strategy intent/capital translation and broker netting. Policies support strategy risk budgets,
@@ -22,6 +25,9 @@
 
 ### Safety
 
+- Shadow cycles require release admission, shadow cutover requires every route release to be
+  `SHADOW`, and runtime startup with `live_orders_enabled=true` requires every route release to be
+  `LIVE`. Release admission never enables live orders by itself.
 - Synthetic `conductor-hold-current` companion intents are policy-invariant, so running one strategy
   on a shared route cannot rescale another strategy that did not run.
 - Existing strategy-level `max_gross_leverage` configuration is now enforced instead of silently
@@ -31,9 +37,10 @@
 
 ### Validation
 
-- Full local suite: 119 passed.
-- Added regressions proving persisted release state wins over later config edits and release evidence
-  is immutable within a version.
+- Full local suite: 126 passed.
+- Added regressions proving persisted release state wins over later config edits, release evidence
+  is immutable within a version, release transitions are audited/idempotent, CLI confirmation is
+  enforced, REVIEW disables runs, and live authority refuses non-LIVE releases.
 
 - Added regressions for strategy leverage/volatility/freshness policy, hold-current invariance,
   per-strategy deadbands, sample covariance, native metadata passthrough, and decision lineage.
