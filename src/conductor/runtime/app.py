@@ -795,6 +795,15 @@ class ConductorRuntimeApp:
                         "mechanism": profile.metadata.mechanism,
                         "research_source": profile.metadata.research_source,
                         "validation_state": profile.metadata.validation_state,
+                        "evidence": [
+                            {
+                                "producer": item.producer,
+                                "artifact_type": item.artifact_type,
+                                "location": item.location,
+                                "version": item.version,
+                            }
+                            for item in profile.metadata.evidence
+                        ],
                     },
                     "allocated_capital": str(account.allocated_capital),
                     "cash": str(account.cash),
