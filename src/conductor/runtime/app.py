@@ -795,6 +795,7 @@ class ConductorRuntimeApp:
                         "mechanism": profile.metadata.mechanism,
                         "research_source": profile.metadata.research_source,
                         "validation_state": profile.metadata.validation_state,
+                        "release_state": profile.metadata.release_state,
                         "evidence": [
                             {
                                 "producer": item.producer,

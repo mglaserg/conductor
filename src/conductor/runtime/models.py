@@ -42,6 +42,7 @@ class StrategyMetadata:
     mechanism: str | None = None
     research_source: str | None = None
     validation_state: str = "research"
+    release_state: str = "research"
     evidence: tuple[EvidenceReference, ...] = ()
 
 
