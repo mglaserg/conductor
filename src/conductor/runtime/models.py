@@ -23,6 +23,17 @@ class StrategyLifecycle(StrEnum):
     RETIRED = "retired"
 
 
+@dataclass(frozen=True, slots=True)
+class StrategyMetadata:
+    """Research and lifecycle metadata attached to a strategy identity."""
+
+    version: str = "0.0.0"
+    family: str | None = None
+    mechanism: str | None = None
+    research_source: str | None = None
+    validation_state: str = "research"
+
+
 class StrategyRunStatus(StrEnum):
     STARTING = "starting"
     RUNNING = "running"
@@ -59,6 +70,7 @@ class StrategyRunnerProfile:
     timeout_seconds: int = 600
     max_concurrent_runs: int = 1
     environment: Mapping[str, str] = field(default_factory=dict)
+    metadata: StrategyMetadata = field(default_factory=StrategyMetadata)
 
     def __post_init__(self) -> None:
         if not self.strategy_id.strip():

@@ -9,7 +9,7 @@ from typing import Any
 from conductor.domain.models import SleeveAllocation
 from conductor.policy import MissingVolatilityBehavior, StrategyPolicy
 from conductor.routing import ExecutionRoute, RouteRegistry
-from conductor.runtime.models import NativeResultMode, StrategyRunnerProfile
+from conductor.runtime.models import NativeResultMode, StrategyMetadata, StrategyRunnerProfile
 
 
 @dataclass(frozen=True, slots=True)
@@ -530,6 +530,13 @@ def load_runtime_config(path: str | Path) -> RuntimeConfig:
             book_id=str(item.get("book_id", "main")),
             timeout_seconds=int(item.get("timeout_seconds", 600)),
             environment={str(k): str(v) for k, v in item.get("environment", {}).items()},
+            metadata=StrategyMetadata(
+                version=str(item.get("version", "0.0.0")),
+                family=(str(item["family"]) if item.get("family") is not None else None),
+                mechanism=(str(item["mechanism"]) if item.get("mechanism") is not None else None),
+                research_source=(str(item["research_source"]) if item.get("research_source") is not None else None),
+                validation_state=str(item.get("validation_state", "research")),
+            ),
         )
         strategies[strategy_id] = profile
         seed = item.get("seed", {})
