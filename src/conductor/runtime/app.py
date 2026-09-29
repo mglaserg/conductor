@@ -789,6 +789,13 @@ class ConductorRuntimeApp:
                     ),
                     "route_id": profile.route_id,
                     "result_mode": profile.result_mode.value,
+                    "metadata": {
+                        "version": profile.metadata.version,
+                        "family": profile.metadata.family,
+                        "mechanism": profile.metadata.mechanism,
+                        "research_source": profile.metadata.research_source,
+                        "validation_state": profile.metadata.validation_state,
+                    },
                     "allocated_capital": str(account.allocated_capital),
                     "cash": str(account.cash),
                     "equity": str(account.equity),
